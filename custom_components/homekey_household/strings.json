@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "HomeKey Household",
+        "description": "Configure a HomeKey household. MQTT is reused from the Home Assistant MQTT integration. The optional recovery secret is used once to derive the household command key locally and is never stored or transmitted.",
+        "data": {
+          "household_id": "Household ID",
+          "household_name": "Household name",
+          "recovery_secret": "Recovery secret (optional)",
+          "salt": "KDF salt (optional)",
+          "command_control": "Enable authenticated lock control"
+        },
+        "data_description": {
+          "household_id": "Matches the household_id published on the household MQTT topics, e.g. HOME-001.",
+          "recovery_secret": "Used only to derive the HMAC command key. Never sent over MQTT and never stored.",
+          "salt": "The salt used by the firmware when deriving the command key, if one is configured.",
+          "command_control": "When disabled the lock entity is read-only. Commands fail closed without a credential."
+        }
+      }
+    },
+    "error": {
+      "invalid_household_id": "Household ID must be 1-64 characters of [A-Za-z0-9_-].",
+      "invalid_recovery_secret": "The recovery secret must not be empty."
+    },
+    "abort": {
+      "mqtt_not_configured": "The Home Assistant MQTT integration is not configured or not connected. Configure MQTT first.",
+      "already_configured": "This household is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "HomeKey Household options",
+        "description": "Rotate the command credential or change availability settings. Leaving the recovery secret blank keeps the current key.",
+        "data": {
+          "recovery_secret": "Recovery secret (leave blank to keep current key)",
+          "salt": "KDF salt (optional)",
+          "command_control": "Enable authenticated lock control",
+          "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)"
+        },
+        "data_description": {
+          "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic."
+        }
+      }
+    },
+    "error": {
+      "invalid_recovery_secret": "The recovery secret must not be empty."
+    }
+  },
+  "entity": {
+    "lock": {
+      "lock": {
+        "name": "Lock"
+      }
+    },
+    "binary_sensor": {
+      "online": {
+        "name": "Node online"
+      }
+    },
+    "sensor": {
+      "health": {
+        "name": "Node health"
+      },
+      "backup": {
+        "name": "Backup status"
+      },
+      "security": {
+        "name": "Security status"
+      },
+      "firmware": {
+        "name": "Firmware version"
+      },
+      "last_auth": {
+        "name": "Last HomeKey authentication"
+      }
+    }
+  },
+  "entity_component": {
+    "lock": {
+      "name": "Lock"
+    }
+  }
+}

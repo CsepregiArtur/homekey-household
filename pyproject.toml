@@ -1,0 +1,86 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "homekey-household"
+version = "2.0.0"
+description = "Home Assistant custom integration for HomeKey-ESP32 households over MQTT"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "HomeKey Household contributors" }]
+classifiers = [
+    "Framework :: Home Assistant",
+    "Programming Language :: Python :: 3",
+    "Topic :: Home Automation",
+]
+# The integration has no third-party runtime dependencies: everything it needs
+# ships with Home Assistant core (the MQTT integration is reused as transport).
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
+    "homeassistant==2026.9.3",
+    "paho-mqtt>=2.0",
+]
+# Test-only dependencies for the REAL integration validation stack (a live MQTT
+# broker plus an MQTT client). These are NOT runtime dependencies of the
+# integration: `dependencies` above stays empty. Install with
+# `pip install -e ".[test,test-integration]"`.
+test-integration = [
+    "amqtt==0.12.1",
+    "aiomqtt==2.5.1",
+]
+lint = [
+    "ruff>=0.5",
+    "mypy>=1.10",
+]
+
+[tool.setuptools]
+packages = []
+
+[tool.setuptools.package-data]
+"*" = ["*.json", "*.yaml"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = ["."]
+# The unit/contract suite is deliberately hermetic: no real sockets, no broker,
+# no Home Assistant bootstrap. The official HA test harness plugin
+# (pytest_homeassistant_custom_component, registered under the pytest11 entry
+# point name "homeassistant") is installed for the separate tests_integration
+# suite, so it is disabled here by its entry-point name to keep this suite fast,
+# isolated and free of its lingering-task/timer teardown checks.
+addopts = "-p no:homeassistant"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+src = ["custom_components", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4"]
+ignore = [
+    "E501",  # line length handled by formatter
+    "B008",  # FastAPI-style default args not relevant here
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["custom_components"]
+
+[tool.mypy]
+python_version = "3.14"
+follow_imports = "silent"
+check_untyped_defs = true
+ignore_missing_imports = true
+warn_unused_ignores = false
+exclude = ["tests"]

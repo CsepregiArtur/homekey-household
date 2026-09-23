@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# Editors
+.vscode/
+.idea/
+.DS_Store
+
+# Home Assistant
+/config/
+config/
+homeassistant.log
+
+# Backup data (never commit encrypted backups or their metadata)
+custom_components/homekey_household/backups/
