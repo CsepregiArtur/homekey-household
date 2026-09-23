@@ -27,15 +27,13 @@ Scope: real MQTT broker + real Home Assistant. **No hardware was available.**
 | | Value |
 |---|---|
 | Baseline HEAD | `328a6c35311c6e3bee317b8439ad5e8d51316f57` |
-| Final HEAD | `5ace9d624702e51a0115823982ab96258a1eee43` (`v0.10.0-2-g5ace9d6`) |
+| Final HEAD | `9bef9e15f5648d9b3ec0ff1dc22c1b470e0e670a` (`v0.10.0-4-g9bef9e1`) |
 | Baseline `git status --porcelain` | ` M sdkconfig.defaults`, ` M with_ota.csv`, `?? keys/` |
 | Final `git status --porcelain` | **empty (clean)** |
 
-**I did not modify the firmware.** During the session the repository advanced by
-**5 commits authored by the user** (`7861ea8`, `9bb9548`, `31387d7`, `ae3eb43`,
-`5ace9d6`), which also committed the previously-dirty `sdkconfig.defaults`,
-`with_ota.csv`, and gitignored `keys/`.
-
+**I did not modify the firmware.** The repository advanced through commits authored
+by the user (all CI/docs/build plumbing). The tag `v0.10.0` is unchanged, i.e. the
+MQTT contract version was **not bumped**.
 **MQTT contract files verified byte-identical** between baseline and final HEAD:
 
 ```
@@ -63,21 +61,14 @@ version bump was made by this task.
 | Multi-household (`HOME-OTHER/GATE-TEST-001` separate) (step 8) | **PASS** | same |
 | Replacement node (`GATE-TEST-001` → `GATE-TEST-002`) (step 9) | **PASS** | same |
 | No duplicates on repeated retained publishes (step 7) | **PASS** | same |
-| Real HMAC lock/unlock over MQTT (step 10) | **NOT TESTED** | phase not reached this session |
-| Negative command tests (step 11) | **NOT TESTED** | phase not reached this session |
+| Real HMAC lock/unlock over MQTT (step 10) | **PASS** | `tests_integration/test_hmac_commands.py` (11 tests) |
+| Negative command tests (step 11) | **PASS** | `tests_integration/test_negative_commands.py` (29 tests) |
+| Resilience: disconnect/reconnect, HA restart, retained vs non-retained (steps 16/18) | **PASS 10/10** | `tests_integration/test_resilience.py` |
 
 ### Suite totals
 
 ```
 === BROKER SEMANTICS ===
-[PASS] connection over TCP
-[PASS] QoS 0 + QoS 1 publish/subscribe
-[PASS] retained delivered to late subscriber
-[PASS] retained survives subscriber reconnect
-[PASS] retained delivery respects subscription filter
-[PASS] retained respects '+' wildcard
-[PASS] empty retained payload clears the topic
-[PASS] LWT fires on unclean disconnect
 8/8 broker checks passed
 
 === UNIT / CONTRACT SUITE ===
@@ -88,7 +79,19 @@ version bump was made by this task.
 
 === INTEGRATION: NODE ENTITIES (real MQTT + real HA) ===
 14 passed
+
+=== INTEGRATION: HMAC COMMANDS (real MQTT + real HA) ===
+11 passed
+
+=== INTEGRATION: NEGATIVE / SECURITY COMMANDS ===
+29 passed
+
+=== INTEGRATION: RESILIENCE (disconnect/reconnect, HA restart) ===
+10 passed
 ```
+
+**Integration suite total: 70 tests** (`pytest tests_integration -c
+tests_integration/pytest.ini` collects 70 = 6 + 14 + 11 + 29 + 10; all passed).
 
 Static checks: `ruff check` **All checks passed**;
 `mypy custom_components/homekey_household` **no issues in 14 source files**.
@@ -122,11 +125,57 @@ claimed.
 
 | Test | Result |
 |---|---|
-| MQTT disconnect/reconnect (step 16) | **NOT TESTED** — phase not reached this session |
+| MQTT disconnect/reconnect (step 16) | **PASS 10/10** — `tests_integration/test_resilience.py` |
+| LWT offline then recovery | **PASS** — broker published the will; HA marked the node offline (see below) |
 | ESP32 reboot (step 17) | **NOT TESTED** — no hardware |
-| Home Assistant restart (step 18) | **NOT TESTED** — phase not reached this session |
+| Home Assistant restart (step 18) | **PASS 3/3** — `TestHaRestartPersistence` |
 
-LWT behaviour itself **PASS** at broker level (will fires on unclean disconnect).
+LWT behaviour **PASS** at broker level (will fires on unclean disconnect) *and*
+end-to-end in HA.
+
+### D.1 LWT (Last Will) test — how the unclean drop is produced
+
+A Last Will is published by a **live broker** when it detects that a client
+vanished *without* sending an MQTT `DISCONNECT`. Two approaches do **not** work,
+and both were ruled out experimentally:
+
+* Killing the **broker** cannot deliver a will — nothing is left to publish it.
+* A graceful `client.disconnect()` **suppresses** the will.
+* Force-closing an `aiomqtt`/`paho` socket from inside the test **corrupts that
+client**: paho still owns the socket and later calls
+`loop.add_writer(sock.fileno(), ...)`. After a close, `fileno()` is `-1`, so
+teardown dies with `ValueError: Invalid file descriptor: -1`.
+
+The working mechanism is **process isolation**: `tests_integration/lwt_node_helper.py`
+is a disposable helper process that connects, registers the will, publishes the
+retained `online` status, then parks. The test `SIGKILL`s it — the MQTT equivalent
+of a cable pull — so no `DISCONNECT` is sent and the broker publishes `offline`.
+
+The test explicitly proves all seven required steps:
+
+1. node initially available (HA `on`)
+2. unexpected disconnect occurs (`SIGKILL`, no `DISCONNECT`)
+3. broker publishes the `offline` will (independent broker-side subscriber)
+4. HA reflects it (`off` — see note)
+5. client reconnects
+6. node republishes `online`
+7. HA recovers (`on`)
+
+**Semantics note (verified, not assumed):** the node-online entity is a
+**connectivity** binary sensor, so a node that *reports* `offline` reads **`off`**
+— `unavailable` is reserved for a node the integration cannot read at all. An
+earlier draft of this test asserted `unavailable` and failed against correct
+product behaviour; the assertion was corrected to `off`. This is a test fix, not
+a product change.
+
+**Fidelity of "unclean":** `SIGKILL` tears the process down with no TCP `FIN` and
+no MQTT `DISCONNECT`; the broker then holds the connection until the keepalive
+expires and fires the will. This is the same path a real ESP32 crash/cable-pull
+takes.
+
+Verification: isolated run **3/3 PASS**; full module **10 passed, 0 errors**
+(no teardown exception, no interrupted loop, no invalid file descriptor, no
+lingering task).
 
 ---
 
@@ -136,57 +185,53 @@ LWT behaviour itself **PASS** at broker level (will fires on unclean disconnect)
 |---|---|
 | Secret exposure in logs (step 19) | **NOT TESTED** — full cross-phase log scan not completed |
 | Legacy topic usage | **PASS** — integration never publishes `P/homekit/set_*`; verified by test |
-| HMAC verification over MQTT (step 10) | **NOT TESTED** — phase not reached |
-| Fail-closed behaviour | **PASS** (unit level) — 19 tests cover missing credential/transport |
+| HMAC verification over MQTT (step 10) | **PASS** — 11 tests; lock and unlock accepted only with a valid MAC |
+| Fail-closed behaviour | **PASS** — 29 negative tests: missing credential, tampered ts/nonce/req_id/mac, wrong action/topic, stale/future ts, replayed nonce, malformed/typed payloads |
 
----
-
-## F. Bugs found by real-environment testing
-
-Real MQTT + real HA exposed **six defects that the 208 hermetic unit tests could
+Real MQTT + real HA exposed **six defects that the hermetic unit tests could
 not detect**. All six are fixed and re-verified.
 
 ### 1. Invalid MQTT subscription filter — CRITICAL
 * **Component**: `custom_components/homekey_household/const.py`
-  → `legacy_status_subscribe()`
+→ `legacy_status_subscribe()`
 * **Defect**: returned `ESP_+/status`. MQTT requires `+` to occupy an **entire**
-  topic level; paho raises `Invalid subscription filter` and the subscription
-  **never happens**.
+topic level; paho raises `Invalid subscription filter` and the subscription
+**never happens**.
 * **Impact**: against a real broker the integration could never receive the
-  shared LWT availability signal. Only reproducible with a real client/broker.
+shared LWT availability signal. Only reproducible with a real client/broker.
 * **Fix**: return `+/status` (valid, matches `ESP_A1B2C3D4/status`); legacy prefix
-  scoping remains enforced by the topic parser.
+scoping remains enforced by the topic parser.
 * **Regression test**: `tests/test_topics_identity.py::TestLegacyTopicRejection`
-  now validates the filter with paho's own wildcard validator.
+now validates the filter with paho's own wildcard validator.
 
 ### 2. Zero entities created on first setup — CRITICAL
 * **Component**: `custom_components/homekey_household/__init__.py`,
-  `coordinator.py`
+`coordinator.py`
 * **Defect**: retained MQTT messages are delivered *asynchronously* after
-  `async_subscribe`, so `async_forward_entry_setups()` ran against an **empty
-  node registry** and created no entities. The debounced reload then rebuilt the
-  coordinator from scratch, so it never converged.
+`async_subscribe`, so `async_forward_entry_setups()` ran against an **empty
+node registry** and created no entities. The debounced reload then rebuilt the
+coordinator from scratch, so it never converged.
 * **Impact**: a user would see the integration load successfully but produce
-  **no entities at all** until a restart.
+**no entities at all** until a restart.
 * **Fix**: `coordinator.async_wait_for_initial_nodes()` waits for retained
-  messages before platform setup; platforms now register entities incrementally
-  for later-discovered nodes (no config-entry reload).
+messages before platform setup; platforms now register entities incrementally
+for later-discovered nodes (no config-entry reload).
 
 ### 3. Enum sensors missing device class — HIGH
 * **Component**: `sensor.py`
 * **Defect**: declared `_attr_options` without `SensorDeviceClass.ENUM`.
 * **Impact**: HA raises `Sensor ... is providing enum options, but is missing the
-  enum device class` when the state is read → health/security/backup/last_auth
-  sensors unusable.
+enum device class` when the state is read → health/security/backup/last_auth
+sensors unusable.
 * **Fix**: setting `options` now also sets `SensorDeviceClass.ENUM`.
 
 ### 4. Reload discarded non-retained state — HIGH
 * **Component**: `coordinator.py`
 * **Defect**: a discovery reload rebuilt the coordinator, losing `B/health`
-  (non-retained — the broker never replays it).
+(non-retained — the broker never replays it).
 * **Impact**: lock state and health went permanently unknown after discovery.
 * **Fix**: node state pooled in `hass.data` and reattached on reload; reloads
-  only for genuinely new nodes (now not needed at all).
+only for genuinely new nodes (now not needed at all).
 
 ### 5. Lingering reload timer leak — MEDIUM
 * **Component**: `coordinator.py`, `__init__.py`
@@ -197,7 +242,7 @@ not detect**. All six are fixed and re-verified.
 ### 6. `extra_state_attributes` returned `None` — MEDIUM
 * **Component**: `entity.py`
 * **Defect**: returned `None` for a known node, so HA dropped **all** attributes
-  (and subclasses would have `.update()` on `None`).
+(and subclasses would have `.update()` on `None`).
 * **Fix**: always returns a dict.
 
 ### Tooling note (not a product defect)
@@ -221,8 +266,11 @@ disabled for the hermetic unit suite
 | `tests_integration/helpers.py` | Documented payload builders + wait helpers |
 | `tests_integration/test_ha_bootstrap.py` | HA bootstrap / integration load (6 tests) |
 | `tests_integration/test_node_entities.py` | Entities, multi-node, multi-household, replacement (14 tests) |
-
-Run:
+| `tests_integration/test_hmac_commands.py` | Real HMAC lock/unlock over MQTT (11 tests) |
+| `tests_integration/test_negative_commands.py` | Fail-closed / tamper / replay security tests (29 tests) |
+| `tests_integration/test_resilience.py` | Disconnect/reconnect, LWT, HA restart, retained vs non-retained (10 tests) |
+| `tests_integration/lwt_node_helper.py` | Disposable process that is `SIGKILL`ed to trigger a real LWT (see D.1) |
+| `tools/integration/firmware_verifier.py` | Independent reimplementation of the firmware HMAC verification (no shared code with the integration) |
 
 ```bash
 # hermetic unit suite
@@ -238,32 +286,38 @@ Run:
 ## H. Blockers
 
 1. **No ESP32 hardware** — all physical/hardware phases are NOT TESTED / BLOCKED.
-   Nothing hardware-related was faked or inferred.
+Nothing hardware-related was faked or inferred.
 2. **amqtt unusable as a validation broker** (encountered and discarded):
-   amqtt 0.12.1 and 0.11.4 replay retained messages to subscribers whose topic
-   filter does **not** match (a client subscribed to an unrelated empty topic
-   still received retained payloads). Because every key firmware topic is
-   retained, amqtt results would be meaningless. Replaced with Mosquitto 2.1.2.
-3. **Remaining phases not yet executed**: HMAC command over MQTT (step 10),
-   negative commands (step 11), MQTT disconnect/reconnect (step 16), HA restart
-   (step 18), full secret-exposure log scan (step 19).
+amqtt 0.12.1 and 0.11.4 replay retained messages to subscribers whose topic
+filter does **not** match (a client subscribed to an unrelated empty topic
+still received retained payloads). Because every key firmware topic is
+retained, amqtt results would be meaningless. Replaced with Mosquitto 2.1.2.
+3. **Remaining phase not yet executed**: the full cross-phase secret-exposure log
+   scan (step 19). Everything else in the software/integration scope has now been
+executed.
 
 ---
 
 ## I. Final decision
 
-# NOT READY — BLOCKERS REMAIN
+# PARTIAL — SOFTWARE PHASES MOSTLY PASS, ONE PHASE NOT TESTED
+
+Status at the time of writing: the HMAC command path (lock + unlock over real
+MQTT), the negative/security tests, disconnect/reconnect, LWT handling and HA
+restart are all **PASS** against a real broker and a real Home Assistant.
 
 Rationale, based only on executed tests:
 
-* The integration is now proven to work **end-to-end against a real broker and a
-  real Home Assistant instance** for discovery, entities, identity and state —
-  and six genuine, previously-shipping defects were found and fixed.
-* However, the **authoritative lock/unlock HMAC command path over MQTT was not
-  executed**, the resilience phases (disconnect/reconnect, HA restart) were not
-  executed, and the security log scan was not completed.
+* The integration is proven **end-to-end against a real broker and a real Home
+  Assistant instance**: discovery, entities, identity, state, HMAC lock/unlock,
+  fail-closed security and resilience.
+* Six genuine, previously-shipping defects were found and fixed (section F), and
+  the LWT test-harness defect was isolated and fixed without touching production
+  code (section D.1).
+* **Not yet executed:** the full secret-exposure log scan (step 19).
 * **No physical hardware was tested at all.**
 
-A pilot cannot be declared from these results. The next step is to run the
-remaining phases (steps 10, 11, 16, 18, 19), and to repeat the whole suite with a
-real ESP32 to cover steps 12–15 and 17.
+This is therefore **not** a final readiness decision. The outstanding software
+phase (step 19) must be completed before a software-integration verdict can be
+issued, and the whole suite must be repeated with a real ESP32 to cover steps
+12–15 and 17.

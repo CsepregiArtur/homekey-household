@@ -22,18 +22,6 @@ import time
 from pathlib import Path
 
 import pytest
-from helpers import (
-    HOUSEHOLD,
-    NODE_GATE,
-    health_payload,
-    last_auth_payload,
-    node_base,
-    publish_telemetry,
-    settle,
-    state_payload,
-)
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 from firmware_verifier import derive_command_key
 from test_hmac_commands import (
     BASE,
@@ -45,8 +33,18 @@ from test_hmac_commands import (
     CommandTap,
     _seed_credential,
     _setup_entry,
-    _setup_mqtt,
     _wait_for_lock_entity,
+)
+
+from helpers import (
+    HOUSEHOLD,
+    NODE_GATE,
+    health_payload,
+    last_auth_payload,
+    node_base,
+    publish_telemetry,
+    settle,
+    state_payload,
 )
 
 DOMAIN = "homekey_household"
@@ -135,6 +133,67 @@ async def _state_becomes(hass, entity_id: str, value: str, timeout: float = 20.0
     return False
 
 
+LWT_HELPER = Path(__file__).resolve().parent / "lwt_node_helper.py"
+
+
+class UncleanNode:
+    """A node running in its OWN process, killable without an MQTT DISCONNECT.
+
+    See ``lwt_node_helper.py`` for why the will must be triggered from a separate
+    process rather than by force-closing a socket inside the test.
+    """
+
+    def __init__(self, client_id: str, status_topic: str) -> None:
+        self.client_id = client_id
+        self.status_topic = status_topic
+        self.proc: subprocess.Popen[str] | None = None
+
+    async def start(self) -> None:
+        self.proc = subprocess.Popen(  # noqa: S603 - fixed script + argv
+            [
+                os.environ.get("LWT_HELPER_PYTHON", "python3"),
+                str(LWT_HELPER),
+                MQTT_BROKER,
+                str(MQTT_PORT),
+                self.client_id,
+                self.status_topic,
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        # Wait for the helper to report that its Will is registered and it has
+        # published the retained ``online`` status.
+        assert self.proc.stdout is not None
+        events: list[str] = []
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            line = await asyncio.get_running_loop().run_in_executor(
+                None, self.proc.stdout.readline
+            )
+            if not line:
+                break
+            events.append(line.strip())
+            if '"online_sent"' in line:
+                return
+        raise AssertionError(
+            f"LWT helper did not come online; events={events!r} "
+            f"rc={self.proc.poll()}"
+        )
+
+    def kill_unclean(self) -> None:
+        """SIGKILL: no DISCONNECT is sent, so the broker fires the Will."""
+        assert self.proc is not None
+        self.proc.send_signal(signal.SIGKILL)
+        self.proc.wait(timeout=10)
+
+    def cleanup(self) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.kill()
+            with contextlib.suppress(Exception):
+                self.proc.wait(timeout=5)
+
+
 def _registry_snapshot(hass) -> tuple[dict[str, str], set[str]]:
     """Return {unique_id: entity_id} and device identifier tuples for the domain."""
     from homeassistant.helpers import device_registry as dr
@@ -159,19 +218,23 @@ class TestMqttDisconnectReconnect:
 
         Fidelity note: an LWT is published by a **live broker** when it detects a
         client disconnect. Killing the broker cannot deliver a will (nothing is
-        left to publish it) — and a graceful MQTT DISCONNECT suppresses it. The
-        drop is therefore emulated with a raw socket that speaks MQTT badly
-        enough to never send DISCONNECT, in a **subprocess** so its sockets are
-        fully isolated from the test's event loop.
+        left to publish it) and a graceful MQTT DISCONNECT suppresses it. The
+        unclean drop is therefore produced by a disposable **helper process**
+        that registers the will, publishes ``online``, then is ``SIGKILL``ed by
+        the test. Nothing in the test's own event loop is ever touched, so
+        teardown stays clean.
 
         Verification is done twice:
           1. observable at the broker (an independent subscriber sees ``offline``)
-          2. observable in Home Assistant (the node entity goes unavailable)
+          2. observable in Home Assistant (the connectivity sensor reads ``off``)
+              * the node-online entity is a CONNECTIVITY binary sensor, so a node
+                reporting ``offline`` reads ``off`` -- ``unavailable`` is reserved
+                for a node the integration cannot read at all.
         """
         import aiomqtt
+        from homeassistant.helpers import entity_registry as er
 
         from helpers import node_base as nb
-        from homeassistant.helpers import entity_registry as er
 
         await _seed_credential(hass, HOUSEHOLD)
         await _setup_entry(hass, HOUSEHOLD)
@@ -183,12 +246,16 @@ class TestMqttDisconnectReconnect:
             if e.unique_id == f"{HOUSEHOLD}_{NODE_GATE}_online":
                 online_id = e.entity_id
         assert online_id is not None, "node online entity missing"
-        assert await _state_becomes(hass, online_id, "on")
+
+        # Step 1: node initially available.
+        assert await _state_becomes(hass, online_id, "on"), (
+            "node did not start available"
+        )
 
         status_topic = f"{nb(HOUSEHOLD, NODE_GATE)}/status"
 
-        # Independent broker-side subscriber, so we can prove the will itself
-        # fired even if HA's view is inconclusive.
+        # Independent broker-side subscriber, so the will itself is proven even
+        # if HA's view were inconclusive.
         will_seen = asyncio.Event()
         seen_payloads: list[str] = []
 
@@ -205,53 +272,37 @@ class TestMqttDisconnectReconnect:
         watcher_task = asyncio.create_task(_watch())
         await asyncio.sleep(0.4)
 
-        # The node connects with the shared LWT and reports online.
-        node = aiomqtt.Client(
-            MQTT_BROKER,
-            MQTT_PORT,
-            identifier=f"node-{int(time.time() * 1000)}",
-            will=aiomqtt.Will(
-                topic=status_topic, payload="offline", qos=1, retain=True
-            ),
-        )
-        await node.__aenter__()
-        await node.publish(status_topic, "online", qos=1, retain=True)
-        await settle(hass, seconds=0.5)
-        assert await _state_becomes(hass, online_id, "on")
-
+        node = UncleanNode(f"node-{int(time.time() * 1000)}", status_topic)
+        await node.start()
         try:
-            # Abrupt drop with no DISCONNECT -> the broker must publish the will.
-            sock = node._client._sock  # noqa: SLF001 - deliberate abrupt drop
-            with contextlib.suppress(OSError):
-                sock.setsockopt(
-                    socket.SOL_SOCKET,
-                    socket.SO_LINGER,
-                    b"\x01\x00\x00\x00\x00\x00\x00\x00",
-                )
-            sock.close()
+            await settle(hass, seconds=0.5)
+            assert await _state_becomes(hass, online_id, "on"), (
+                "node did not report online via its own process"
+            )
 
-            # 1. Broker-side proof that the will fired.
+            # Step 2: unexpected disconnect (SIGKILL -> no MQTT DISCONNECT).
+            node.kill_unclean()
+
+            # Step 3: broker publishes the offline LWT.
             try:
                 async with asyncio.timeout(20):
                     await will_seen.wait()
             except TimeoutError:
-                watcher_task.cancel()
                 pytest.fail(
                     f"broker never published the LWT offline; saw {seen_payloads}"
                 )
 
-            # 2. Home Assistant must reflect it as unavailable.
-            assert await _unavailable(hass, online_id, timeout=20), (
-                "LWT fired at the broker but HA did not mark the node unavailable"
+            # Step 4: HA sees the node go offline.
+            assert await _state_becomes(hass, online_id, "off", timeout=20), (
+                "LWT fired at the broker but HA did not mark the node offline"
             )
         finally:
+            node.cleanup()
             watcher_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await watcher_task
-            with contextlib.suppress(Exception):
-                await node.__aexit__(None, None, None)
 
-        # --- E/F: node reconnects and republishes -> available again ---
+        # Steps 5-7: node reconnects, publishes online, HA recovers.
         async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as node2:
             await node2.publish(status_topic, "online", qos=1, retain=True)
             await node2.publish(

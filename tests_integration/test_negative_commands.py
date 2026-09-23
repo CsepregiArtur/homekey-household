@@ -23,16 +23,12 @@ import json
 import time
 
 import pytest
-from helpers import HOUSEHOLD, NODE_GATE, publish_telemetry, settle
-from pytest_homeassistant_custom_component.common import MockConfigEntry
-
 from firmware_verifier import (
     MAX_SKEW_SECONDS,
     FirmwareReject,
     FirmwareVerifier,
     derive_command_key,
 )
-
 from test_hmac_commands import (
     BASE,
     LOCK_TOPIC,
@@ -44,9 +40,10 @@ from test_hmac_commands import (
     CommandTap,
     _seed_credential,
     _setup_entry,
-    _setup_mqtt,
     _wait_for_lock_entity,
 )
+
+from helpers import HOUSEHOLD, NODE_GATE, publish_telemetry, settle
 
 DOMAIN = "homekey_household"
 

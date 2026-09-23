@@ -27,10 +27,10 @@ import time
 from dataclasses import dataclass
 
 import pytest
-from helpers import HOUSEHOLD, NODE_GATE, publish_telemetry, settle
+from firmware_verifier import FirmwareReject, FirmwareVerifier, derive_command_key
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
-from firmware_verifier import FirmwareReject, FirmwareVerifier, derive_command_key
+from helpers import HOUSEHOLD, NODE_GATE, publish_telemetry, settle
 
 DOMAIN = "homekey_household"
 MQTT_BROKER = "127.0.0.1"
