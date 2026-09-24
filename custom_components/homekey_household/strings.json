@@ -2,6 +2,22 @@
   "config": {
     "step": {
       "user": {
+        "title": "Set up MQTT",
+        "description": "HomeKey Household uses the official Home Assistant MQTT integration as its transport. MQTT is not configured yet — choose how you want to continue.",
+        "menu_options": {
+          "mqtt_guide": "Walk me through the MQTT setup",
+          "mqtt_express": "Configure MQTT for me (express)"
+        }
+      },
+      "mqtt_guide": {
+        "title": "Configure MQTT",
+        "description": "Install and configure the official MQTT integration, then come back and press Submit.\n\n1. Go to [Settings → Devices & Services](/config/integrations).\n2. Click **Add Integration** and choose **MQTT**.\n3. Enter your broker host/port (and credentials if required) and finish the wizard.\n4. Press **Submit** below to re-check the connection.\n\nThe integration is a pure consumer of the firmware MQTT topics; the broker can be Mosquitto or any MQTT broker.\n\nDocumentation: {docs}"
+      },
+      "mqtt_express": {
+        "title": "Configure MQTT automatically",
+        "description": "Enter your broker details. HomeKey Household will create the official MQTT integration entry for you.\n\nUse the MQTT protocol version 5 (the default; the firmware is also compatible with 3.1.1). Host 127.0.0.1 is only correct if the broker runs on the same host as Home Assistant."
+      },
+      "household": {
         "title": "HomeKey Household",
         "description": "Configure a HomeKey household. MQTT is reused from the Home Assistant MQTT integration. The optional recovery secret is used once to derive the household command key locally and is never stored or transmitted.",
         "data": {
@@ -21,10 +37,11 @@
     },
     "error": {
       "invalid_household_id": "Household ID must be 1-64 characters of [A-Za-z0-9_-].",
-      "invalid_recovery_secret": "The recovery secret must not be empty."
+      "invalid_recovery_secret": "The recovery secret must not be empty.",
+      "mqtt_not_configured": "MQTT is still not configured or not connected. Finish the MQTT setup, then try again.",
+      "mqtt_setup_failed": "Could not create the MQTT integration automatically. Please add the MQTT integration manually from Settings → Devices & Services, then try again."
     },
     "abort": {
-      "mqtt_not_configured": "The Home Assistant MQTT integration is not configured or not connected. Configure MQTT first.",
       "already_configured": "This household is already configured."
     }
   },

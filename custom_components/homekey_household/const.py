@@ -41,6 +41,21 @@ CONF_LEGACY_CLIENT_ID_PREFIX: Final = "legacy_client_id_prefix"
 DEFAULT_LEGACY_CLIENT_ID_PREFIX: Final = "ESP_"
 DEFAULT_COMMAND_CONTROL: Final = True
 
+# ---------------------------------------------------------------------------
+# Official MQTT integration (express setup path)
+# ---------------------------------------------------------------------------
+# Domain of the Home Assistant core MQTT integration used as the transport.
+MQTT_DOMAIN: Final = "mqtt"
+# Config-entry keys expected by the MQTT integration's broker step.
+CONF_MQTT_BROKER: Final = "broker"
+CONF_MQTT_PORT: Final = "port"
+CONF_MQTT_USERNAME: Final = "username"
+CONF_MQTT_PASSWORD: Final = "password"
+CONF_MQTT_PROTOCOL: Final = "protocol"
+DEFAULT_MQTT_BROKER: Final = "127.0.0.1"
+DEFAULT_MQTT_PORT: Final = 1883
+DEFAULT_MQTT_PROTOCOL: Final = "5"
+
 # Firmware version whose household contract this integration implements.
 TARGET_FIRMWARE_VERSION: Final = "0.10.0"
 
