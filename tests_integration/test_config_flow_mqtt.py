@@ -4,8 +4,9 @@ These exercise the real HA config-flow engine (``hass.config_entries.flow``), no
 a hand-rolled mock, so the menu, the abort-free behaviour and the express MQTT
 entry creation are all validated end to end.
 
-The tests must not depend on a real broker: ``mqtt.async_wait_for_mqtt_client``
-is patched so "MQTT available" can be toggled deterministically.
+Most tests patch ``async_validate_mqtt`` so "MQTT available" can be toggled
+deterministically; the express test additionally uses the real disposable broker
+because the official MQTT flow validates broker reachability.
 """
 
 from __future__ import annotations
@@ -35,6 +36,27 @@ async def test_offers_menu_when_mqtt_missing(hass):
 
     assert result["type"] == "menu"
     assert result["step_id"] == "user"
+    assert set(result["menu_options"]) == {"mqtt_guide", "mqtt_express"}
+
+
+async def test_flow_starts_with_no_mqtt_entry_at_all(hass):
+    """REGRESSION: the flow must start even when MQTT has NO config entry.
+
+    This is the real-world first-install case. If ``mqtt`` were listed in the
+    manifest ``dependencies``, Home Assistant would raise DependencyError before
+    the flow ever ran, so the user would see nothing at all instead of the
+    guided/express menu. Nothing is patched here: no MQTT entry exists, and the
+    integration must still load and offer the menu.
+    """
+    # Precondition: no MQTT config entry in this fresh hass.
+    assert not hass.config_entries.async_entries(MQTT_DOMAIN)
+
+    result = await _start_flow(hass)
+
+    assert result["type"] == "menu", (
+        f"expected the setup menu without an MQTT entry, got {result['type']!r} "
+        f"({result.get('reason') or result.get('errors')})"
+    )
     assert set(result["menu_options"]) == {"mqtt_guide", "mqtt_express"}
 
 

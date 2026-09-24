@@ -38,12 +38,19 @@ async def test_integration_resolves_via_ha_loader(hass):
 
 
 async def test_manifest_contract(hass):
-    """Manifest declares config flow, reuses MQTT, and has no requirements."""
+    """Manifest declares a config flow, has no requirements, and does NOT hard-depend on MQTT.
+
+    MQTT must NOT be listed in ``dependencies``: Home Assistant refuses to load an
+    integration whose dependencies are not set up, which would make the
+    integration impossible to add when MQTT is not yet configured (and would hide
+    the guided/express setup menu entirely). MQTT availability is instead checked
+    at runtime by the config flow (``async_validate_mqtt``).
+    """
     from homeassistant import loader
 
     manifest = (await loader.async_get_integration(hass, DOMAIN)).manifest
     assert manifest.get("config_flow") is True
-    assert "mqtt" in (manifest.get("dependencies") or [])
+    assert "mqtt" not in (manifest.get("dependencies") or [])
     assert not (manifest.get("requirements") or [])
 
 
