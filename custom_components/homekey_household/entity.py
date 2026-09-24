@@ -47,8 +47,17 @@ class HomeKeyBaseEntity(CoordinatorEntity[HomeKeyHouseholdCoordinator]):
             name=f"HomeKey Household Node: {name}",
             manufacturer=MANUFACTURER,
             model=MODEL,
-            sw_version=node.firmware if node and node.firmware else None,
-            hw_version=TARGET_FIRMWARE_VERSION,
+            # Software version = the node's reported firmware. Until the node
+            # reports it, fall back to the firmware contract this integration
+            # implements, so the device card never shows a blank version.
+            sw_version=(
+                node.firmware
+                if node and node.firmware
+                else TARGET_FIRMWARE_VERSION
+            ),
+            # ``hw_version`` is deliberately NOT set: the firmware version is
+            # software, not hardware. It was previously mislabelled there, which
+            # made the device card show the firmware version twice.
         )
 
     @property
