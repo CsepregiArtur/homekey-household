@@ -155,3 +155,42 @@ async def test_express_step_creates_mqtt_entry(hass, mosquitto_broker, socket_en
     assert mqtt_entries, "express path did not create an MQTT config entry"
     assert mqtt_entries[0].data["broker"] == mosquitto_broker["host"]
     assert mqtt_entries[0].data["port"] == mosquitto_broker["port"]
+
+
+async def test_express_step_surfaces_real_error(hass, socket_enabled):
+    """Express setup must show the MQTT flow's OWN error, not a generic one.
+
+    Regression: an unreachable broker used to be reported as the generic
+    "mqtt_setup_failed", which hid the real cause. It must now surface
+    "cannot_connect" so the user knows to fix the host/port.
+
+    No broker is used here: the address is deliberately unreachable.
+    """
+    with (
+        patch(
+            "custom_components.homekey_household.config_flow.async_validate_mqtt",
+            return_value=False,
+        ),
+        patch(
+            "custom_components.homekey_household.config_flow._async_mqtt_entry_exists",
+            return_value=False,
+        ),
+    ):
+        await _start_flow(hass)
+        flow_id = next(
+            f
+            for f in hass.config_entries.flow.async_progress()
+            if f["handler"] == DOMAIN
+        )["flow_id"]
+        await hass.config_entries.flow.async_configure(
+            flow_id, {"next_step_id": "mqtt_express"}
+        )
+        result = await hass.config_entries.flow.async_configure(
+            flow_id, {"broker": "127.0.0.1", "port": 59999}
+        )
+        await hass.async_block_till_done()
+
+    assert result["type"] == "form"
+    assert result["step_id"] == "mqtt_express"
+    # The specific, actionable error is shown (not "mqtt_setup_failed").
+    assert result["errors"] == {"base": "cannot_connect"}

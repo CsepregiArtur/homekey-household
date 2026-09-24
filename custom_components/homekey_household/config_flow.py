@@ -108,6 +108,11 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 1
 
+    def __init__(self) -> None:
+        """Track the last MQTT-flow error so it can be shown to the user."""
+        super().__init__()
+        self._mqtt_express_error: str | None = None
+
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -175,7 +180,12 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
 
                 if await self._async_create_mqtt_entry(data):
                     return await self.async_step_household()
-                errors["base"] = "mqtt_setup_failed"
+                # Surface the MQTT flow's own error (e.g. cannot_connect) instead
+                # of a generic message, so the user knows what to fix. The
+                # express path requires a REACHABLE broker: 127.0.0.1 is only
+                # correct when the broker runs on the same host as Home
+                # Assistant.
+                errors["base"] = self._mqtt_express_error or "mqtt_setup_failed"
 
         return self.async_show_form(
             step_id="mqtt_express",
@@ -238,10 +248,14 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             return False
 
         if result.get("type") != "create_entry":
+            errors = result.get("errors") or {}
+            # Prefer the specific MQTT error (cannot_connect, invalid_auth, ...)
+            # so the user gets an actionable message rather than a generic one.
+            self._mqtt_express_error = errors.get("base") or None
             _LOGGER.warning(
                 "Express MQTT setup did not create an entry (type=%s, errors=%s)",
                 result.get("type"),
-                result.get("errors"),
+                errors,
             )
             return False
 

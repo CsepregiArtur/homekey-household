@@ -39,7 +39,10 @@
       "invalid_household_id": "Household ID must be 1-64 characters of [A-Za-z0-9_-].",
       "invalid_recovery_secret": "The recovery secret must not be empty.",
       "mqtt_not_configured": "MQTT is still not configured or not connected. Finish the MQTT setup, then try again.",
-      "mqtt_setup_failed": "Could not create the MQTT integration automatically. Please add the MQTT integration manually from Settings → Devices & Services, then try again."
+      "mqtt_setup_failed": "Could not create the MQTT integration automatically. Please add the MQTT integration manually from Settings → Devices & Services, then try again.",
+      "cannot_connect": "Home Assistant could not reach the MQTT broker at that address. Check the host and port, and make sure the broker is running and reachable from this machine. Note: 127.0.0.1 only works if the broker runs on the same host as Home Assistant.",
+      "invalid_auth": "The broker rejected the username/password.",
+      "bad_ws_headers": "The WebSocket headers are invalid."
     },
     "abort": {
       "already_configured": "This household is already configured."
