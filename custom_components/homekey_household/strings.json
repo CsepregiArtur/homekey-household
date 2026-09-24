@@ -24,7 +24,7 @@
       },
       "household": {
         "title": "HomeKey Household",
-        "description": "Configure a HomeKey household. MQTT is reused from the Home Assistant MQTT integration. The optional recovery secret is used once to derive the household command key locally and is never stored or transmitted.",
+        "description": "Configure a HomeKey household. MQTT is reused from the Home Assistant MQTT integration.\n\nAll fields below are editable — the values are prefilled from the device/MQTT discovery where possible, but you can change any of them before submitting.",
         "data": {
           "household_id": "Household ID",
           "household_name": "Household name",
@@ -34,8 +34,8 @@
         },
         "data_description": {
           "household_id": "Matches the household_id published on the household MQTT topics, e.g. HOME-001.",
-          "recovery_secret": "Used only to derive the HMAC command key. Never sent over MQTT and never stored.",
-          "salt": "The salt used by the firmware when deriving the command key, if one is configured.",
+          "recovery_secret": "Used only to derive the HMAC command key. Never sent over MQTT and never stored by Home Assistant. Example format: 24359u234fhurbgerbvuiebvubervbvun. Keep a copy in a safe place (e.g. your password manager) — Home Assistant does not keep it, so if you lose it you cannot re-derive the command key.",
+          "salt": "The salt the firmware uses when deriving the command key, if one is configured. Leave empty if the firmware uses no salt.",
           "command_control": "When disabled the lock entity is read-only. Commands fail closed without a credential."
         }
       }
@@ -48,7 +48,11 @@
       "cannot_connect": "Home Assistant could not reach the MQTT broker at that address. Check the host and port, and make sure the broker is running and reachable from this machine. Note: 127.0.0.1 only works if the broker runs on the same host as Home Assistant.",
       "invalid_auth": "The broker rejected the username/password.",
       "bad_ws_headers": "The WebSocket headers are invalid.",
-      "mqtt_addon_failed": "Could not install or start the Mosquitto broker add-on. Check Supervisor, then try again or use the express setup instead."
+      "mqtt_addon_failed": "Could not install or start the Mosquitto broker add-on. Check Supervisor, then try again or use the express setup instead.",
+      "mqtt_addon_unavailable": "Supervisor did not offer the Mosquitto broker add-on for installation. Install the 'Mosquitto broker' add-on from Settings → Add-ons, start it, then choose this option again — or use the express setup instead.",
+      "addon_info_failed": "Supervisor could not read the Mosquitto broker add-on's information. Open Settings → Add-ons → Mosquitto broker and check that it is installed correctly, then try again.",
+      "addon_connection_failed": "The Mosquitto broker add-on did not come up in time. Open Settings → Add-ons → Mosquitto broker, confirm it is running, then try again. If it keeps failing, check the add-on's own log for errors.",
+      "addon_start_failed": "The Mosquitto broker add-on started, but Home Assistant could not connect to it. Open the add-on's Log tab and fix any startup errors (for example, a port conflict or a broken configuration), then try again. Using the express setup with your own broker credentials also works."
     },
     "abort": {
       "already_configured": "This household is already configured.",

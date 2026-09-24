@@ -152,6 +152,33 @@ async def test_express_step_creates_mqtt_entry(hass, mosquitto_broker, socket_en
     assert result["type"] == "form", result
     assert result["step_id"] == "household"
 
+    # The express path prefills the household form (derived from the broker the
+    # user just chose), but every field must stay editable — prefilling is a
+    # convenience, not a lock-in.
+    schema = result["data_schema"].schema
+    defaults = {
+        key.schema: key.default()
+        for key in schema
+        if getattr(key, "default", None) is not None
+        and callable(getattr(key, "default", None))
+    }
+    assert defaults.get("household_name") == f"HomeKey ({mosquitto_broker['host']})"
+    # The two credential fields are intentionally left blank, never prefilled.
+    assert "recovery_secret" in {k.schema for k in schema}
+    assert "salt" in {k.schema for k in schema}
+    # Editable: submitting an explicitly different household name is accepted.
+    result = await hass.config_entries.flow.async_configure(
+        flow_id,
+        {
+            "household_id": "HOME-001",
+            "household_name": "My own name",
+            "command_control": False,
+        },
+    )
+    await hass.async_block_till_done()
+    assert result["type"] == "create_entry", result
+    assert result["title"] == "My own name"
+
     # A real MQTT config entry now exists, pointing at the broker we supplied.
     mqtt_entries = hass.config_entries.async_entries(MQTT_DOMAIN)
     assert mqtt_entries, "express path did not create an MQTT config entry"
@@ -265,3 +292,95 @@ async def test_addon_step_unreachable_without_supervisor(hass):
             await hass.config_entries.flow.async_configure(
                 result["flow_id"], {"next_step_id": "mqtt_addon"}
             )
+
+
+@pytest.mark.parametrize(
+    ("mqtt_result", "expected"),
+    [
+        # The MQTT flow reports the cause either as errors.base or as an abort
+        # reason; both must reach the user instead of a generic message.
+        (
+            {"type": "form", "errors": {"base": "addon_start_failed"}},
+            "addon_start_failed",
+        ),
+        ({"type": "abort", "reason": "addon_info_failed"}, "addon_info_failed"),
+        ({"type": "abort", "reason": "addon_install_failed"}, "addon_install_failed"),
+        (
+            {"type": "abort", "reason": "addon_connection_failed"},
+            "addon_connection_failed",
+        ),
+    ],
+)
+async def test_addon_step_surfaces_real_error(hass, mqtt_result, expected):
+    """The real Mosquitto add-on failure reason is recorded, not a generic one.
+
+    Whatever the MQTT flow reports (``errors.base`` or an abort ``reason``) must
+    be preserved so the add-on form can display it, rather than collapsing to
+    ``mqtt_addon_failed``.
+
+    ``addon_install_failed`` / ``addon_start_failed`` are the *expected*
+    outcome while Supervisor is still downloading or starting the add-on: HA's
+    own ``_async_start_addon`` sleeps ``ADDON_SETUP_TIMEOUT`` (5 s) up to
+    ``ADDON_SETUP_TIMEOUT_ROUNDS`` (5) times, so it can give up after ~25 s
+    even though the add-on is installing normally. Hence the "wait and retry"
+    guidance in the translation strings.
+    """
+    from custom_components.homekey_household.config_flow import (
+        HomeKeyHouseholdConfigFlow,
+    )
+
+    handler = HomeKeyHouseholdConfigFlow()
+    handler.hass = hass
+
+    # async_init returns the Supervisor menu; the add-on branch we then select
+    # resolves straight to the failure result the MQTT flow reported.
+    menu = {"type": "menu", "flow_id": "mqtt-flow", "menu_options": ["addon"]}
+
+    with (
+        patch(
+            "custom_components.homekey_household.config_flow.async_validate_mqtt",
+            return_value=False,
+        ),
+        patch.object(hass.config_entries.flow, "async_init", return_value=dict(menu)),
+        patch.object(
+            hass.config_entries.flow,
+            "async_configure",
+            return_value=dict(mqtt_result),
+        ),
+    ):
+        ok = await handler._async_setup_mqtt_addon()
+
+    assert ok is False
+    assert handler._mqtt_addon_error == expected
+
+
+async def test_addon_step_reports_unavailable_when_no_addon_branch(hass):
+    """If Supervisor offers no add-on branch, say so instead of a generic error.
+
+    This is a distinct path from a failed install/start: the MQTT flow never
+    reached its add-on branch, so the actionable guidance is "install the
+    Mosquitto broker add-on yourself" (or use the express setup).
+    """
+    from custom_components.homekey_household.config_flow import (
+        HomeKeyHouseholdConfigFlow,
+    )
+
+    handler = HomeKeyHouseholdConfigFlow()
+    handler.hass = hass
+
+    # The MQTT flow starts on a form (no add-on branch offered at all).
+    with (
+        patch(
+            "custom_components.homekey_household.config_flow.async_validate_mqtt",
+            return_value=False,
+        ),
+        patch.object(
+            hass.config_entries.flow,
+            "async_init",
+            return_value={"type": "form", "flow_id": "mqtt-flow", "step_id": "user"},
+        ),
+    ):
+        ok = await handler._async_setup_mqtt_addon()
+
+    assert ok is False
+    assert handler._mqtt_addon_error == "mqtt_addon_unavailable"

@@ -123,6 +123,11 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         """Track the last MQTT-flow error so it can be shown to the user."""
         super().__init__()
         self._mqtt_express_error: str | None = None
+        self._mqtt_addon_error: str | None = None
+        # Prefilled household values (editable in the form). Populated from the
+        # MQTT entry the user just created, so the express/add-on paths arrive
+        # pre-configured but the user can still change anything.
+        self._household_defaults: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -192,6 +197,12 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                 del password
 
                 if await self._async_create_mqtt_entry(data):
+                    # Prefill the household step from what the user just chose so
+                    # the express path arrives pre-configured; every field stays
+                    # editable in the form.
+                    self._household_defaults.setdefault(
+                        "name", f"HomeKey ({user_input[CONF_MQTT_BROKER]})"
+                    )
                     return await self.async_step_household()
                 # Surface the MQTT flow's own error (e.g. cannot_connect) instead
                 # of a generic message, so the user knows what to fix. The
@@ -204,12 +215,10 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="mqtt_express",
             data_schema=vol.Schema(
                 {
-                    vol.Required(
-                        CONF_MQTT_BROKER, default=DEFAULT_MQTT_BROKER
-                    ): str,
-                    vol.Required(
-                        CONF_MQTT_PORT, default=DEFAULT_MQTT_PORT
-                    ): vol.Coerce(int),
+                    vol.Required(CONF_MQTT_BROKER, default=DEFAULT_MQTT_BROKER): str,
+                    vol.Required(CONF_MQTT_PORT, default=DEFAULT_MQTT_PORT): vol.Coerce(
+                        int
+                    ),
                     vol.Optional(CONF_MQTT_USERNAME): str,
                     vol.Optional(CONF_MQTT_PASSWORD): str,
                 }
@@ -292,10 +301,17 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         if user_input is not None:
             if await self._async_setup_mqtt_addon():
                 return await self.async_step_household()
+            # Surface the SPECIFIC add-on failure instead of a generic message:
+            #   addon_info_failed       -> Supervisor could not read add-on info
+            #   addon_connection_failed -> the add-on did not come up in time
+            #   addon_start_failed      -> the add-on started but MQTT never
+            #                              connected (most common: the add-on
+            #                              is stopped, or it needs its own
+            #                              MQTT credentials/logins configured)
             return self.async_show_form(
                 step_id="mqtt_addon",
                 data_schema=vol.Schema({}),
-                errors={"base": "mqtt_addon_failed"},
+                errors={"base": self._mqtt_addon_error or "mqtt_addon_failed"},
             )
 
         return self.async_show_form(
@@ -311,8 +327,14 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         then start it, then create the entry from discovery. We therefore keep
         advancing the flow (answering each progress step) until it either creates
         the entry or fails, with a bounded number of rounds.
+
+        On failure the MQTT flow reports either an ``errors.base`` key or an
+        ``abort`` ``reason``; both are recorded in ``_mqtt_addon_error`` so the
+        user sees the real cause.
         """
         from homeassistant.data_entry_flow import FlowResultType
+
+        self._mqtt_addon_error = None
 
         try:
             result = await self.hass.config_entries.flow.async_init(
@@ -323,9 +345,8 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             return False
 
         # The MQTT user step is a menu on Supervisor: choose the add-on branch.
-        if (
-            result.get("type") == FlowResultType.MENU
-            and "addon" in (result.get("menu_options") or [])
+        if result.get("type") == FlowResultType.MENU and "addon" in (
+            result.get("menu_options") or []
         ):
             flow_id = result["flow_id"]
             result = await self.hass.config_entries.flow.async_configure(
@@ -333,10 +354,10 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             )
         else:
             _LOGGER.warning(
-                "Add-on MQTT setup: MQTT flow did not offer an add-on branch "
-                "(type=%s)",
+                "Add-on MQTT setup: MQTT flow did not offer an add-on branch (type=%s)",
                 result.get("type"),
             )
+            self._mqtt_addon_error = "mqtt_addon_unavailable"
             return False
 
         # Advance progress steps (install_addon / start_addon) until settled.
@@ -350,11 +371,15 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                 result["flow_id"], {}
             )
 
-        self._mqtt_express_error = (result.get("errors") or {}).get("base") or None
+        # Preserve the real reason: an error key, an abort reason, or give up.
+        error_key = (result.get("errors") or {}).get("base")
+        reason = result.get("reason") if rtype == FlowResultType.ABORT else None
+        self._mqtt_addon_error = error_key or reason or "mqtt_addon_failed"
         _LOGGER.warning(
-            "Add-on MQTT setup did not create an entry (type=%s, reason=%s)",
+            "Add-on MQTT setup did not create an entry (type=%s, error=%s, reason=%s)",
             result.get("type"),
-            result.get("reason"),
+            error_key,
+            reason,
         )
         return False
 
@@ -417,19 +442,38 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                         },
                     )
 
+        # Build the schema with only the defaults we actually know: passing
+        # ``default=None`` to an optional ``str`` field makes voluptuous reject
+        # the form, so an unknown prefill must be omitted rather than set.
+        fields: dict[Any, Any] = {}
+        id_default = self._household_defaults.get("id")
+        if id_default:
+            fields[vol.Required(CONF_HOUSEHOLD_ID, default=id_default)] = str
+        else:
+            fields[vol.Required(CONF_HOUSEHOLD_ID)] = str
+
+        name_default = self._household_defaults.get("name")
+        if name_default:
+            fields[vol.Optional(CONF_HOUSEHOLD_NAME, default=name_default)] = str
+        else:
+            fields[vol.Optional(CONF_HOUSEHOLD_NAME)] = str
+
+        # Credentials are never prefilled: the secret is entered once, and a
+        # salt is only meaningful when the firmware is configured with one.
+        fields[vol.Optional(CONF_RECOVERY_SECRET)] = str
+        salt_default = self._household_defaults.get("salt")
+        if salt_default:
+            fields[vol.Optional(CONF_SALT, default=salt_default)] = str
+        else:
+            fields[vol.Optional(CONF_SALT)] = str
+
+        fields[vol.Optional(CONF_COMMAND_CONTROL, default=DEFAULT_COMMAND_CONTROL)] = (
+            bool
+        )
+
         return self.async_show_form(
             step_id="household",
-            data_schema=vol.Schema(
-                {
-                    vol.Required(CONF_HOUSEHOLD_ID): str,
-                    vol.Optional(CONF_HOUSEHOLD_NAME): str,
-                    vol.Optional(CONF_RECOVERY_SECRET): str,
-                    vol.Optional(CONF_SALT): str,
-                    vol.Optional(
-                        CONF_COMMAND_CONTROL, default=DEFAULT_COMMAND_CONTROL
-                    ): bool,
-                }
-            ),
+            data_schema=vol.Schema(fields),
             errors=errors,
             description_placeholders={"docs": DOCS_URL},
         )

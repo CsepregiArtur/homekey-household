@@ -24,7 +24,7 @@ async def test_integration_version_comes_from_manifest(hass):
 
     manifest = (await loader.async_get_integration(hass, DOMAIN)).manifest
     assert manifest["version"]  # a version key must exist for custom integrations
-    assert manifest["version"] == "2.2.1"
+    assert manifest["version"] == "2.2.2"
 
 
 async def test_device_reports_firmware_as_sw_version(hass, mqtt_client):
