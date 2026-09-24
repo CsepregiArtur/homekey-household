@@ -73,6 +73,17 @@ async def _async_mqtt_entry_exists(hass: HomeAssistant) -> bool:
     )
 
 
+def _is_hassio(hass: HomeAssistant) -> bool:
+    """True when Supervisor is available (Home Assistant OS / Supervised).
+
+    Only there can the official Mosquitto broker add-on be installed, so the
+    add-on setup option is offered only in that case.
+    """
+    from homeassistant.helpers.hassio import is_hassio
+
+    return is_hassio(hass)
+
+
 def _schema_defaults(schema: Any) -> dict[str, Any]:
     """Collect the default values from a voluptuous schema.
 
@@ -116,13 +127,15 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Entry point: ensure MQTT, or offer guided / express setup."""
+        """Entry point: ensure MQTT, or offer guided / express / add-on setup."""
         if not await async_validate_mqtt(self.hass):
             # MQTT is missing (or present but not connected). Offer a choice.
-            return self.async_show_menu(
-                step_id="user",
-                menu_options=["mqtt_guide", "mqtt_express"],
-            )
+            # The add-on option only makes sense where Supervisor can install
+            # the official Mosquitto add-on, i.e. Home Assistant OS/Supervised.
+            options = ["mqtt_guide", "mqtt_express"]
+            if _is_hassio(self.hass):
+                options.append("mqtt_addon")
+            return self.async_show_menu(step_id="user", menu_options=options)
         return await self.async_step_household()
 
     # ------------------------------------------------------------------
@@ -260,6 +273,90 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             return False
 
         return await async_validate_mqtt(self.hass)
+
+    # ------------------------------------------------------------------
+    # Add-on setup (Home Assistant OS / Supervised only)
+    # ------------------------------------------------------------------
+    async def async_step_mqtt_addon(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Install and wire up the official Mosquitto broker add-on.
+
+        Zero input: Supervisor installs/starts the add-on and the MQTT
+        integration's own flow derives the entry from the add-on's discovery
+        info. Only offered when ``_is_hassio`` is true; guarded again here.
+        """
+        if not _is_hassio(self.hass):
+            return self.async_abort(reason="not_hassio")
+
+        if user_input is not None:
+            if await self._async_setup_mqtt_addon():
+                return await self.async_step_household()
+            return self.async_show_form(
+                step_id="mqtt_addon",
+                data_schema=vol.Schema({}),
+                errors={"base": "mqtt_addon_failed"},
+            )
+
+        return self.async_show_form(
+            step_id="mqtt_addon",
+            data_schema=vol.Schema({}),
+            description_placeholders={"docs": DOCS_URL},
+        )
+
+    async def _async_setup_mqtt_addon(self) -> bool:
+        """Drive the MQTT flow's add-on branch to completion.
+
+        The MQTT add-on branch is a *progress* flow: it may install the add-on,
+        then start it, then create the entry from discovery. We therefore keep
+        advancing the flow (answering each progress step) until it either creates
+        the entry or fails, with a bounded number of rounds.
+        """
+        from homeassistant.data_entry_flow import FlowResultType
+
+        try:
+            result = await self.hass.config_entries.flow.async_init(
+                MQTT_DOMAIN, context={"source": "user"}
+            )
+        except Exception:  # pragma: no cover - defensive
+            _LOGGER.exception("Add-on MQTT setup failed to start the MQTT flow")
+            return False
+
+        # The MQTT user step is a menu on Supervisor: choose the add-on branch.
+        if (
+            result.get("type") == FlowResultType.MENU
+            and "addon" in (result.get("menu_options") or [])
+        ):
+            flow_id = result["flow_id"]
+            result = await self.hass.config_entries.flow.async_configure(
+                flow_id, {"next_step_id": "addon"}
+            )
+        else:
+            _LOGGER.warning(
+                "Add-on MQTT setup: MQTT flow did not offer an add-on branch "
+                "(type=%s)",
+                result.get("type"),
+            )
+            return False
+
+        # Advance progress steps (install_addon / start_addon) until settled.
+        for _ in range(20):
+            rtype = result.get("type")
+            if rtype == FlowResultType.CREATE_ENTRY:
+                return await async_validate_mqtt(self.hass)
+            if rtype != FlowResultType.SHOW_PROGRESS:
+                break
+            result = await self.hass.config_entries.flow.async_configure(
+                result["flow_id"], {}
+            )
+
+        self._mqtt_express_error = (result.get("errors") or {}).get("base") or None
+        _LOGGER.warning(
+            "Add-on MQTT setup did not create an entry (type=%s, reason=%s)",
+            result.get("type"),
+            result.get("reason"),
+        )
+        return False
 
     # ------------------------------------------------------------------
     # Household identity + command credential

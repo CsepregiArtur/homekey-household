@@ -13,6 +13,8 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
+import pytest
+
 DOMAIN = "homekey_household"
 MQTT_DOMAIN = "mqtt"
 
@@ -194,3 +196,72 @@ async def test_express_step_surfaces_real_error(hass, socket_enabled):
     assert result["step_id"] == "mqtt_express"
     # The specific, actionable error is shown (not "mqtt_setup_failed").
     assert result["errors"] == {"base": "cannot_connect"}
+
+
+async def test_addon_option_hidden_without_supervisor(hass):
+    """The add-on option must NOT appear on a non-Supervisor installation.
+
+    This is the important guarantee: Home Assistant Container / Core cannot
+    install the Mosquitto add-on, so offering the option there would only
+    produce a dead end.
+    """
+    assert "hassio" not in hass.config.components  # no Supervisor in tests
+
+    with patch(
+        "custom_components.homekey_household.config_flow.async_validate_mqtt",
+        return_value=False,
+    ):
+        result = await _start_flow(hass)
+
+    assert result["type"] == "menu"
+    assert set(result["menu_options"]) == {"mqtt_guide", "mqtt_express"}
+    assert "mqtt_addon" not in result["menu_options"]
+
+
+async def test_addon_option_shown_with_supervisor(hass):
+    """The add-on option appears only when Supervisor is present."""
+    # Simulate a Supervised / HA OS installation.
+    with (
+        patch(
+            "custom_components.homekey_household.config_flow.async_validate_mqtt",
+            return_value=False,
+        ),
+        patch(
+            "custom_components.homekey_household.config_flow._is_hassio",
+            return_value=True,
+        ),
+    ):
+        result = await _start_flow(hass)
+
+    assert result["type"] == "menu"
+    assert "mqtt_addon" in result["menu_options"]
+
+
+async def test_addon_step_unreachable_without_supervisor(hass):
+    """Without Supervisor the add-on step cannot even be selected.
+
+    Home Assistant validates the menu selection against the offered options, so
+    ``mqtt_addon`` is rejected at the schema level when it is not offered. That
+    is the strongest form of the guarantee: the option is not just hidden, it is
+    unreachable.
+    """
+    from homeassistant.data_entry_flow import InvalidData
+
+    with (
+        patch(
+            "custom_components.homekey_household.config_flow.async_validate_mqtt",
+            return_value=False,
+        ),
+        patch(
+            "custom_components.homekey_household.config_flow._is_hassio",
+            return_value=False,
+        ),
+    ):
+        result = await hass.config_entries.flow.async_init(
+            DOMAIN, context={"source": "user"}
+        )
+        assert "mqtt_addon" not in result["menu_options"]
+        with pytest.raises(InvalidData):
+            await hass.config_entries.flow.async_configure(
+                result["flow_id"], {"next_step_id": "mqtt_addon"}
+            )

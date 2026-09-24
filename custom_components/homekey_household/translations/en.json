@@ -6,7 +6,8 @@
         "description": "HomeKey Household uses the official Home Assistant MQTT integration as its transport. MQTT is not configured yet — choose how you want to continue.",
         "menu_options": {
           "mqtt_guide": "Walk me through the MQTT setup",
-          "mqtt_express": "Configure MQTT for me (express)"
+          "mqtt_express": "Configure MQTT for me (express)",
+          "mqtt_addon": "Use the MQTT add-on (Home Assistant OS only)"
         }
       },
       "mqtt_guide": {
@@ -16,6 +17,10 @@
       "mqtt_express": {
         "title": "Configure MQTT automatically",
         "description": "Enter your broker details. HomeKey Household will create the official MQTT integration entry for you.\n\nUse the MQTT protocol version 5 (the default; the firmware is also compatible with 3.1.1). Host 127.0.0.1 is only correct if the broker runs on the same host as Home Assistant."
+      },
+      "mqtt_addon": {
+        "title": "Use the MQTT add-on",
+        "description": "Install and start the official Mosquitto broker add-on via Supervisor, then wire up the MQTT integration automatically.\n\nThis needs no broker details. It is available only on Home Assistant OS or a Supervised installation, because only there can Supervisor install the add-on. Press **Submit** to continue."
       },
       "household": {
         "title": "HomeKey Household",
@@ -42,10 +47,12 @@
       "mqtt_setup_failed": "Could not create the MQTT integration automatically. Please add the MQTT integration manually from Settings → Devices & Services, then try again.",
       "cannot_connect": "Home Assistant could not reach the MQTT broker at that address. Check the host and port, and make sure the broker is running and reachable from this machine. Note: 127.0.0.1 only works if the broker runs on the same host as Home Assistant.",
       "invalid_auth": "The broker rejected the username/password.",
-      "bad_ws_headers": "The WebSocket headers are invalid."
+      "bad_ws_headers": "The WebSocket headers are invalid.",
+      "mqtt_addon_failed": "Could not install or start the Mosquitto broker add-on. Check Supervisor, then try again or use the express setup instead."
     },
     "abort": {
-      "already_configured": "This household is already configured."
+      "already_configured": "This household is already configured.",
+      "not_hassio": "The MQTT add-on option is only available on Home Assistant OS or a Supervised installation."
     }
   },
   "options": {
