@@ -183,10 +183,73 @@ lingering task).
 
 | Check | Result |
 |---|---|
-| Secret exposure in logs (step 19) | **NOT TESTED** — full cross-phase log scan not completed |
+| Secret exposure in logs (step 19) | **PASS (product)** — see E.1; one HA-core DEBUG finding |
 | Legacy topic usage | **PASS** — integration never publishes `P/homekit/set_*`; verified by test |
 | HMAC verification over MQTT (step 10) | **PASS** — 11 tests; lock and unlock accepted only with a valid MAC |
 | Fail-closed behaviour | **PASS** — 29 negative tests: missing credential, tampered ts/nonce/req_id/mac, wrong action/topic, stale/future ts, replayed nonce, malformed/typed payloads |
+
+### E.1 Secret-exposure log scan (step 19) — method and result
+
+A dedicated scanner (`tools/integration/scan_logs_for_secrets.py`) runs the real
+HMAC + negative-command tests while capturing **all** log output at DEBUG, then
+searches the captured text for the **actual values** of every secret present
+during the run and **attributes each match to the logger that emitted it**.
+Raw evidence is written to `/tmp/step19_scan.log`. The scan exits non-zero only
+for integration-emitted secret material, so it can gate CI.
+
+Secrets searched (actual values, not names):
+
+* the recovery secret (`integration-test-recovery-secret`)
+* the salt value (`integration-test-salt`)
+* the derived command key, hex form (re-derived independently via the documented
+  BLAKE2b KDF — the scanner does not import the integration)
+* command MACs (the `"mac"` field of the command payload)
+
+Result, attributed by logger:
+
+| Value | Integration (`custom_components.*`) | Test harness | HA core MQTT client |
+|---|---|---|---|
+| recovery secret | **absent** | absent | absent |
+| salt value | **absent** | present | absent |
+| derived command key (hex) | **absent** | present | absent |
+| command MAC | **absent** | absent | **present (238×)** |
+
+**Product verdict: PASS.** The integration never logs the recovery secret, the
+derived command key, the salt or the MAC at any level. This was verified both
+statically (every `_LOGGER.*` call site in `custom_components/**` inspected; all
+emit only node/req_id/subtopic identifiers) and dynamically (the scan above).
+`diagnostics.py` additionally redacts key material and exposes only a one-way
+fingerprint (`SHA-256(key)[:8]`).
+
+**F1 — Test-harness exposure (not a product defect).**
+`pytest_homeassistant_custom_component.common` logs the **full payload** of every
+`Store` read/write at DEBUG (`common.py:1550` `"Loading data for %s: %s"`, and
+`:1558` `"Writing data to %s: %s"`). Because the integration persists the derived
+command key via `Store`, the harness prints the storage JSON — key hex and salt
+included. Home Assistant's **real** `Store`
+(`homeassistant/helpers/storage.py`) logs only the store key and the file path
+(`:614`), never the contents, so this exposure exists **only in tests**.
+Severity: test-infrastructure. No product change is warranted or made.
+
+**F2 — HA core MQTT client logs command MACs at DEBUG (core behaviour, not an
+integration defect).**
+`homeassistant.components.mqtt.client` logs the entire payload of every
+publish/receive at DEBUG (`client.py:772` "Transmitting message on …" and
+`client.py:1337` "Received message on …"), so the 4-field command payload —
+including `mac` — appears in the log (238 occurrences in this run). The MAC is
+**not** a stored secret and cannot be replayed (the firmware bounds the
+timestamp to ±300 s and tracks a bounded nonce window), but it is
+command-authentication material. The integration logs only `req_id`
+(`mqtt.py`, `_LOGGER.info("Published authenticated %s command … (req_id=%s)")`).
+Its own transport log cannot be suppressed by the integration.
+
+**Operational recommendation (no contract change): do not run Home Assistant with
+`homeassistant.components.mqtt.client` at DEBUG in production.** This is a
+deployment note, not a code defect.
+
+---
+
+## F. Bugs found by real-environment testing
 
 Real MQTT + real HA exposed **six defects that the hermetic unit tests could
 not detect**. All six are fixed and re-verified.
@@ -271,6 +334,7 @@ disabled for the hermetic unit suite
 | `tests_integration/test_resilience.py` | Disconnect/reconnect, LWT, HA restart, retained vs non-retained (10 tests) |
 | `tests_integration/lwt_node_helper.py` | Disposable process that is `SIGKILL`ed to trigger a real LWT (see D.1) |
 | `tools/integration/firmware_verifier.py` | Independent reimplementation of the firmware HMAC verification (no shared code with the integration) |
+| `tools/integration/scan_logs_for_secrets.py` | Step 19: captures DEBUG logs from a real run and attributes any secret/MAC match to its logger (see E.1) |
 
 ```bash
 # hermetic unit suite
@@ -292,32 +356,47 @@ amqtt 0.12.1 and 0.11.4 replay retained messages to subscribers whose topic
 filter does **not** match (a client subscribed to an unrelated empty topic
 still received retained payloads). Because every key firmware topic is
 retained, amqtt results would be meaningless. Replaced with Mosquitto 2.1.2.
-3. **Remaining phase not yet executed**: the full cross-phase secret-exposure log
-   scan (step 19). Everything else in the software/integration scope has now been
-executed.
+3. **Software/integration scope is complete.** Step 19 (secret-exposure log scan)
+   is now executed (section E.1); every remaining gap is the absence of physical
+   hardware.
 
 ---
 
 ## I. Final decision
 
-# PARTIAL — SOFTWARE PHASES MOSTLY PASS, ONE PHASE NOT TESTED
+# SOFTWARE INTEGRATION READY — HARDWARE VALIDATION REMAINS
 
-Status at the time of writing: the HMAC command path (lock + unlock over real
-MQTT), the negative/security tests, disconnect/reconnect, LWT handling and HA
-restart are all **PASS** against a real broker and a real Home Assistant.
+Scope of this decision: **software and integration only**. Hardware is explicitly
+excluded (see C and H.1).
 
-Rationale, based only on executed tests:
+Every software/integration phase has now been executed against a **real MQTT
+broker and a real Home Assistant instance**:
 
-* The integration is proven **end-to-end against a real broker and a real Home
-  Assistant instance**: discovery, entities, identity, state, HMAC lock/unlock,
-  fail-closed security and resilience.
-* Six genuine, previously-shipping defects were found and fixed (section F), and
-  the LWT test-harness defect was isolated and fixed without touching production
-  code (section D.1).
-* **Not yet executed:** the full secret-exposure log scan (step 19).
-* **No physical hardware was tested at all.**
+| Area | Result |
+|---|---|
+| Broker semantics | PASS 8/8 |
+| HA bootstrap / integration load | PASS 6/6 |
+| Node entities, identity, multi-node, multi-household, replacement | PASS 14/14 |
+| HMAC lock over real MQTT | PASS |
+| HMAC unlock over real MQTT | PASS |
+| Negative / security (fail-closed, tamper, replay, nonce/req-id) | PASS 29/29 |
+| MQTT disconnect/reconnect + LWT | PASS |
+| Home Assistant restart persistence | PASS |
+| Retained vs non-retained state behaviour | PASS |
+| Secret-exposure log scan (step 19) | PASS (product) — see E.1 |
+| Task/resource cleanup (no lingering task in the integration) | PASS |
+| Static analysis | `ruff` clean, `mypy` clean (14 files) |
+| Hermetic unit / contract suite | 209 passed |
 
-This is therefore **not** a final readiness decision. The outstanding software
-phase (step 19) must be completed before a software-integration verdict can be
-issued, and the whole suite must be repeated with a real ESP32 to cover steps
-12–15 and 17.
+Six genuine, previously-shipping defects were found by real-environment testing
+and fixed (section F); the LWT test harness was independently corrected without
+touching production code (section D.1); and a HA-core DEBUG logging behaviour was
+documented (section E.1, F2) without a contract change.
+
+**What this does NOT cover.** No ESP32, no lock actuator and no HomeKey reader
+were ever present. Steps 12–15 and 17 remain NOT TESTED / BLOCKED (section C).
+The full system is therefore **not** production-ready: the next phase is
+validation with **real hardware** (real ESP32 + real lock + real HomeKey
+credential), repeating the whole suite end-to-end.
+
+---
