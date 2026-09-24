@@ -14,6 +14,7 @@ from __future__ import annotations
 from unittest.mock import patch
 
 import pytest
+from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 DOMAIN = "homekey_household"
 MQTT_DOMAIN = "mqtt"
@@ -39,6 +40,49 @@ async def test_offers_menu_when_mqtt_missing(hass):
     assert result["type"] == "menu"
     assert result["step_id"] == "user"
     assert set(result["menu_options"]) == {"mqtt_guide", "mqtt_express"}
+
+
+async def test_household_form_is_prefilled_when_mqtt_already_configured(hass):
+    """REGRESSION: the household form must be prefilled in the common case.
+
+    The usual situation is that MQTT is *already* configured, so the flow goes
+    straight from ``user`` to ``household`` and never touches the express step.
+    Seeding the prefill only from the express step therefore left the form blank
+    for most users, which is what happened in practice.
+    """
+    from homeassistant.components.mqtt.const import CONF_BROKER
+
+    hass.config_entries.flow.hass = hass
+    entry = MockConfigEntry(
+        domain=MQTT_DOMAIN,
+        data={CONF_BROKER: "192.168.1.50", "port": 1883},
+    )
+    entry.add_to_hass(hass)
+
+    with patch(
+        "custom_components.homekey_household.config_flow.async_validate_mqtt",
+        return_value=True,
+    ):
+        result = await _start_flow(hass)
+
+    # Went straight to the household form (MQTT already present).
+    assert result["type"] == "form", result
+    assert result["step_id"] == "household"
+
+    schema = result["data_schema"].schema
+    defaults = {
+        key.schema: key.default()
+        for key in schema
+        if callable(getattr(key, "default", None))
+    }
+    # Prefilled from the existing MQTT entry's broker.
+    assert defaults.get("household_name") == "HomeKey (192.168.1.50)"
+    # Credentials must never be prefilled.
+    assert "recovery_secret" not in defaults
+    assert "salt" not in defaults
+    # The household id is firmware-owned, so it is required and blank.
+    id_key = next(k for k in schema if k.schema == "household_id")
+    assert not callable(getattr(id_key, "default", None))
 
 
 async def test_flow_starts_with_no_mqtt_entry_at_all(hass):

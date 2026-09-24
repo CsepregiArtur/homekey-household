@@ -386,11 +386,36 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
     # ------------------------------------------------------------------
     # Household identity + command credential
     # ------------------------------------------------------------------
+    @callback
+    def _async_mqtt_household_defaults(self) -> dict[str, Any]:
+        """Derive editable household prefills from the configured MQTT entry.
+
+        The household id is the one thing every topic depends on, and the
+        firmware publishes it, so we cannot invent it. But we *can* label the
+        form meaningfully from the broker the user already set up, which is what
+        makes the form feel pre-configured instead of blank. Nothing sensitive
+        (username/password) is ever read or shown here.
+        """
+        from homeassistant.components.mqtt.const import CONF_BROKER
+
+        for entry in self.hass.config_entries.async_entries(MQTT_DOMAIN):
+            broker = entry.data.get(CONF_BROKER) or entry.data.get(CONF_MQTT_BROKER)
+            if broker:
+                return {"name": f"HomeKey ({broker})"}
+        return {}
+
     async def async_step_household(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Collect household identity and optional command credentials."""
         errors: dict[str, str] = {}
+        # Prefill from whatever is actually known at this point, regardless of
+        # how the user got here. MQTT is usually already configured (the common
+        # case), so relying on the express step to seed this left the form empty.
+        self._household_defaults = {
+            **self._async_mqtt_household_defaults(),
+            **self._household_defaults,
+        }
         if user_input is not None:
             household_id = user_input[CONF_HOUSEHOLD_ID].strip()
             name = (user_input.get(CONF_HOUSEHOLD_NAME) or "").strip() or household_id
