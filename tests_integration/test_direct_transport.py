@@ -82,6 +82,8 @@ class FakeNodeServer:
         self.port: int | None = None
         self.lock_current = LOCK_LOCKED
         self.lock_target = LOCK_LOCKED
+        # What asked for the most recent change, mirroring LockManager::sourceName().
+        self.lock_source = "device"
         self.lock_requests: list[str] = []
         self.state_requests = 0
         self._runner: web.AppRunner | None = None
@@ -163,6 +165,11 @@ class FakeNodeServer:
                 },
                 "security": "OK",
                 "backup_status": "completed",
+                "lock_last": {
+                    "current": self.lock_current,
+                    "target": self.lock_target,
+                    "source": self.lock_source,
+                },
                 "last_auth": {
                     "type": "HomeKey",
                     "result": "SUCCESS",
@@ -181,6 +188,9 @@ class FakeNodeServer:
         self.lock_requests.append(action)
         self.lock_current = LOCK_LOCKED if action == "lock" else LOCK_UNLOCKED
         self.lock_target = self.lock_current
+        # Commands arrive through the device's own API, which is how the firmware reports
+        # them: a change Home Assistant asked for, not one made at the door.
+        self.lock_source = "api"
         return web.json_response(
             {
                 "action": action,
@@ -353,6 +363,19 @@ async def start_flow(hass, service_info):
     )
     await hass.async_block_till_done()
     return result
+
+
+async def poll_once(hass) -> None:
+    """Advance past the poll interval and let the background poll finish.
+
+    Two intervals rather than one, so the test does not depend on how long setup itself
+    took. Only one extra poll can happen: the helper iterates the timers that existed when
+    it was called, so the rescheduled one is not in that snapshot.
+    """
+    async_fire_time_changed(
+        hass, dt_util.utcnow() + timedelta(seconds=DIRECT_POLL_INTERVAL_SECONDS * 2)
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +679,75 @@ async def test_reauth_replaces_the_credential(hass, node):
     entry = hass.config_entries.async_entries(DOMAIN)[0]
     assert entry.data[CONF_PASSWORD] == PASSWORD
     assert entry.state is ConfigEntryState.LOADED
+
+
+async def test_unlock_at_the_door_is_attributed_in_the_activity_log(hass, node):
+    """The whole point of the lock-cause work, with a real Home Assistant.
+
+    The node knows what changed the lock, reports it, and the integration turns that into a
+    cause the activity view can name - sharing the context of the state change so the two
+    are joined rather than merely adjacent.
+    """
+    from homeassistant.const import EVENT_LOGBOOK_ENTRY
+
+    entry = direct_entry(node)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+
+    lock_id = hass.states.async_entity_ids("lock")[0]
+    assert hass.states.get(lock_id).state == "locked"
+
+    entries: list = []
+    hass.bus.async_listen(EVENT_LOGBOOK_ENTRY, entries.append)
+
+    # Someone unlocks it at the door. The node reports the new state *and* what caused it.
+    node.lock_current = LOCK_UNLOCKED
+    node.lock_target = LOCK_UNLOCKED
+    node.lock_source = "homekit"
+    await poll_once(hass)
+
+    assert hass.states.get(lock_id).state == "unlocked"
+    assert len(entries) == 1, entries
+    assert entries[0].data["entity_id"] == lock_id
+    assert "unlocked" in entries[0].data["message"]
+    assert "HomeKit" in entries[0].data["message"]
+    # The state change must carry the same context: that is what the activity view joins
+    # the cause to. Without it the entry is just an unrelated line in the log.
+    assert hass.states.get(lock_id).context == entries[0].context
+
+    # A repeat reading is not a change, so it is not attributed twice.
+    await poll_once(hass)
+    assert len(entries) == 1
+
+
+async def test_a_change_home_assistant_made_keeps_home_assistants_attribution(
+    hass, node
+):
+    """A service call's own context must survive, or the user's name would vanish."""
+    from homeassistant.const import EVENT_LOGBOOK_ENTRY
+    from homeassistant.core import Context
+
+    entry = direct_entry(node)
+    entry.add_to_hass(hass)
+    assert await hass.config_entries.async_setup(entry.entry_id)
+    await hass.async_block_till_done()
+    lock_id = hass.states.async_entity_ids("lock")[0]
+
+    entries: list = []
+    hass.bus.async_listen(EVENT_LOGBOOK_ENTRY, entries.append)
+
+    context = Context()
+    await hass.services.async_call(
+        "lock", "unlock", {"entity_id": lock_id}, blocking=True, context=context
+    )
+    await hass.async_block_till_done(wait_background_tasks=True)
+
+    assert node.lock_requests == ["unlock"]
+    assert hass.states.get(lock_id).state == "unlocked"
+    # Nothing of ours was added, and the change still carries the service call's context.
+    assert entries == []
+    assert hass.states.get(lock_id).context == context
 
 
 async def test_unload_stops_polling(hass, node):

@@ -303,5 +303,11 @@ class TestKnownSubtopicSets:
             PLAIN_SUBTOPICS,
         )
 
-        assert {TOPIC_STATE, TOPIC_HEALTH, "backup/last", TOPIC_LAST_AUTH} == JSON_SUBTOPICS
+        assert {
+            TOPIC_STATE,
+            TOPIC_HEALTH,
+            "backup/last",
+            TOPIC_LAST_AUTH,
+            "lock/last",
+        } == JSON_SUBTOPICS
         assert {TOPIC_STATUS, TOPIC_SECURITY, "backup/status"} == PLAIN_SUBTOPICS

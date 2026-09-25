@@ -250,6 +250,10 @@ class HomeKeyLastAuthSensor(HomeKeyBaseSensor):
         # Only the safe metadata published on this topic is surfaced.
         attributes["auth_type"] = node.last_auth.auth_type
         attributes["auth_timestamp"] = node.last_auth.timestamp
+        # The name the user gave the controller that authenticated. Present only when the
+        # device sent one, which happens only when the user named that issuer: the device
+        # never publishes the underlying issuer id.
+        attributes["issuer"] = node.last_auth.issuer
         attributes["auth_age_seconds"] = _age_seconds(
             _parse_dt(node.last_auth.timestamp)
         )

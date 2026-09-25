@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "homekey-household"
-version = "2.3.0"
+version = "2.4.0"
 description = "Home Assistant custom integration for HomeKey-ESP32 households over MQTT or a broker-less direct connection"
 readme = "README.md"
 requires-python = ">=3.12"

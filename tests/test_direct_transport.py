@@ -26,6 +26,7 @@ from custom_components.homekey_household.const import (
     TOPIC_BACKUP_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
+    TOPIC_LOCK_LAST,
     TOPIC_SECURITY,
     TOPIC_STATE,
     TOPIC_STATUS,
@@ -234,6 +235,30 @@ class TestStateToMessages:
         assert TOPIC_SECURITY not in payloads
         assert TOPIC_BACKUP_STATUS not in payloads
         assert TOPIC_LAST_AUTH not in payloads
+
+    def test_the_lock_cause_is_sent_before_the_state_it_explains(self):
+        state = node_state(lock_last={"current": 0, "target": 0, "source": "homekit"})
+        messages = state_to_messages(state, NODE_INFO, household_id=HID, node_id=NID)
+        order = [message.subtopic for message in messages]
+
+        assert TOPIC_LOCK_LAST in order
+        # The cause has to be known by the time the health document carrying the new lock
+        # state is read, or the change cannot be attributed to it.
+        assert order.index(TOPIC_LOCK_LAST) < order.index(TOPIC_HEALTH)
+
+    def test_the_lock_cause_survives_the_round_trip(self):
+        state = node_state(lock_last={"current": 0, "target": 0, "source": "homekey"})
+        payloads = subtopics(
+            state_to_messages(state, NODE_INFO, household_id=HID, node_id=NID)
+        )
+        assert json.loads(payloads[TOPIC_LOCK_LAST])["source"] == "homekey"
+
+    def test_no_cause_is_invented_when_the_node_reports_none(self):
+        # Firmware predating the field: nothing is claimed rather than guessed at.
+        payloads = subtopics(
+            state_to_messages(node_state(), NODE_INFO, household_id=HID, node_id=NID)
+        )
+        assert TOPIC_LOCK_LAST not in payloads
 
     @pytest.mark.parametrize("value", ["unknown", "", "ok", "completed"])
     def test_backup_status_outside_the_contract_is_not_sent(self, value):

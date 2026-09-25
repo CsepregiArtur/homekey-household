@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Any
 
 from .const import (
+    KEY_AUTH_ISSUER,
     KEY_AUTH_RESULT,
     KEY_AUTH_TYPE,
     KEY_BACKUP,
@@ -29,7 +30,10 @@ from .const import (
     KEY_FREE_HEAP,
     KEY_GENERATION,
     KEY_HOUSEHOLD_ID,
+    KEY_LOCK_CHANGE_CURRENT,
+    KEY_LOCK_CHANGE_TARGET,
     KEY_LOCK_CURRENT,
+    KEY_LOCK_SOURCE,
     KEY_LOCK_TARGET,
     KEY_MQTT,
     KEY_MQTT_ERROR,
@@ -46,6 +50,7 @@ from .const import (
     KEY_UPTIME,
     AuthResult,
     BackupOutcome,
+    LockSource,
     LockState,
     NodeRole,
 )
@@ -350,6 +355,9 @@ class LastAuth:
     auth_type: str
     result: str
     timestamp: str | None = None
+    # The name the user gave the controller that authenticated, when they gave one. The
+    # firmware never sends the issuer id, so an unnamed issuer is simply unnamed here.
+    issuer: str | None = None
 
     @classmethod
     def from_dict(cls, payload: Any, household_id: str, node_id: str) -> LastAuth:
@@ -365,6 +373,44 @@ class LastAuth:
             timestamp=normalise_timestamp(
                 data.get(KEY_TIMESTAMP), "last_auth.timestamp"
             ),
+            issuer=_optional_str(data, KEY_AUTH_ISSUER),
+        )
+
+
+@dataclass(frozen=True)
+class LockChange:
+    """Parsed ``B/lock/last`` payload: what changed the lock, and to what.
+
+    Separate from ``B/health`` because a state is a property and an origin is an event:
+    re-announcing a state must not re-announce an old cause.
+    """
+
+    current: int
+    source: str
+    target: int | None = None
+    timestamp: str | None = None
+
+    @classmethod
+    def from_dict(cls, payload: Any, household_id: str, node_id: str) -> LockChange:
+        data = _require_dict(payload, "lock/last")
+        validate_identity(data, household_id, node_id, "lock/last")
+
+        # ``current`` is what ties this cause to a state change. Without it the entry
+        # cannot be matched to the change it describes, so it is required rather than
+        # optional - a cause that cannot be attributed is worse than none.
+        current = _optional_int(data, KEY_LOCK_CHANGE_CURRENT)
+        if current is None:
+            raise ValidationError("lock/last.current: missing")
+
+        source = _optional_str(data, KEY_LOCK_SOURCE)
+        if source not in set(LockSource):
+            raise ValidationError(f"lock/last.source: unknown value {source!r}")
+
+        return cls(
+            current=current,
+            source=source,
+            target=_optional_int(data, KEY_LOCK_CHANGE_TARGET),
+            timestamp=normalise_timestamp(data.get(KEY_TIMESTAMP), "lock/last.timestamp"),
         )
 
 
@@ -394,6 +440,9 @@ class Node:
     backup_status: str | None = None
     backup: BackupRecord | None = None
     last_auth: LastAuth | None = None
+    # The most recent change the node reported, including what asked for it. Kept so a
+    # lock state change can be attributed to a cause rather than to nothing.
+    lock_change: LockChange | None = None
 
     def __post_init__(self) -> None:
         if not self.node_name:

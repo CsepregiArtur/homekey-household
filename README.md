@@ -137,6 +137,41 @@ Device identity is `household_id + node_id` (never the MAC address or HomeKit
 
 ---
 
+## Knowing who opened the door
+
+Home Assistant can only credit a change it was told the reason for. A change asked for
+*from* Home Assistant carries your service call's context — which is why the activity log
+names you and says "Action used: Lock lock". A change made at the door had nobody to
+attribute to: the node reported a number and nothing else.
+
+The firmware now publishes `B/lock/last` immediately before the state it explains, saying
+what asked for the change — `homekit`, `homekey`, `mqtt`, `api` or `device`. The integration
+turns a device-originated change into a cause that shares the context of the state change,
+so the activity log reads *"Gate unlocked by HomeKit"* instead of *"No cause was
+recorded"*.
+
+A change Home Assistant asked for is deliberately left alone. Its context is already
+pending on the entity and is consumed by the write the change causes, which is what puts
+your name there; overriding it with a source word would replace a real person with a vaguer
+description.
+
+The device is the authority on this, and it is careful about it: a cause is only used for
+the change it actually describes. If the node reports a cause for a different change — or
+none at all, on older firmware — nothing is claimed rather than guessed at.
+
+### Naming a paired controller
+
+A node's Web UI (Dashboard → HomeKey → an issuer) lets you give a paired controller a name,
+because HomeKit never tells the accessory one: HAP exposes only an opaque pairing id and a
+public key, so there is nothing to derive a name from.
+
+The name you type is published with `B/last_auth` and appears as the `issuer` attribute on
+the **Last HomeKey authentication** sensor. Only the name is sent — never the issuer id —
+and only when you have given one, so a node with unnamed issuers publishes exactly what it
+always did.
+
+---
+
 ## The direct transport's HTTP surface
 
 Documented by the firmware; listed here so the contract the client implements is

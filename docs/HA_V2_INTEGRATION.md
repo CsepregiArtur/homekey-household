@@ -420,6 +420,80 @@ logger:
 
 ---
 
+## 16. Knowing who opened the door
+
+### The problem
+
+Home Assistant attributes a state change to whatever `Context` was attached when the state
+was written. A change asked for from Home Assistant already has one: `helpers/service.py`
+calls `entity.async_set_context(<the service call's context>)` before the service handler
+runs, and this integration's lock does not write a new state at that moment — it publishes a
+command. The context therefore stays pending and is consumed by the **next** state write,
+which is the one the node's report causes. That is why those read *"artur — Action used:
+Lock lock"*.
+
+A change made at the door had nobody to attribute to. The node reported a number in
+`B/health` and nothing that identified a person, so "No cause was recorded" was accurate
+rather than a bug.
+
+### What the node reports
+
+`B/lock/last` (retained, published immediately *before* the state it explains):
+
+```json
+{"current":0,"target":0,"source":"homekit","timestamp":1760000000}
+```
+
+`source` is `homekit`, `homekey`, `mqtt`, `api`, `device`, or `unknown`. `current`/`target`
+use the same numbering as `lock_current`/`lock_target` in `B/health`.
+
+`LockManager` carries the origin on every `LOCK_STATE_CHANGED` event. It used to overwrite it
+with `INTERNAL` in three places, which is why every change previously looked identical.
+
+### How the cause is applied
+
+The coordinator keeps the reported cause on the node. When a health document arrives whose
+`lock_current` **differs** from the previous reading, and the recorded cause's `current`
+matches the new state, and the source is one Home Assistant did not cause
+(`homekit`/`homekey`/`device`), it:
+
+1. creates a fresh `Context`,
+2. records a logbook entry for the node's lock entity with that context, and
+3. hands the same context to the entities, which write their state with it via
+   `async_set_context()` — the same mechanism a service call uses.
+
+Because the logbook entry and the state change share a context, the activity view can join
+them and name the cause.
+
+The context is dropped once the update has been delivered, so it cannot be attached to an
+unrelated later change.
+
+### What is deliberately *not* done
+
+* **A change Home Assistant asked for is left alone.** `mqtt` and `api` sources are ignored:
+the service call's own context is already pending, and overriding it would replace a real
+person with a source word.
+* **A stale cause is never used.** If the recorded cause's `current` does not match the new
+state, it describes a different change and is discarded.
+* **Nothing is inferred.** No timing windows, no guessing from `B/last_auth`. If the node did
+not say, this integration does not claim to know.
+* **Attribution cannot break ingestion.** The work is wrapped so a failure to write a
+logbook entry can never stop a real reading from being published.
+
+### Naming a paired controller
+
+`HomeSpan`'s `Controller` exposes only `getID()` and `getLTPK()` — HAP never tells an
+accessory a controller's name — so an issuer cannot be labelled automatically. The node's
+Web UI (Dashboard → HomeKey → an issuer) allows naming one by hand, stored in the
+reader-data blob and dropped when that pairing ends.
+
+The name is published with `B/last_auth` and surfaced as the `issuer` attribute on the
+**Last HomeKey authentication** sensor. Only the name is sent, never the issuer id, and only
+when one has been given — so naming is an explicit opt-in to sharing it, and a node with
+unnamed issuers publishes exactly what it always did.
+
+---
+
 ## 15. The broker-less (direct) transport
 
 ### Why it exists

@@ -42,6 +42,7 @@ from .const import (
     TOPIC_BACKUP_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
+    TOPIC_LOCK_LAST,
     TOPIC_SECURITY,
     TOPIC_STATE,
     TOPIC_STATUS,
@@ -295,6 +296,21 @@ def state_to_messages(
             retain=True,
         )
     ]
+
+    # Sent before the health document that carries the resulting lock state, so the cause
+    # is on record by the time the change it explains is seen. Absent on firmware
+    # predating the field, in which case nothing is claimed rather than guessed.
+    lock_last = state.get("lock_last")
+    if isinstance(lock_last, dict) and lock_last.get("source"):
+        messages.append(
+            HomeKeyMessage(
+                household_id=household_id,
+                node_id=node_id,
+                subtopic=TOPIC_LOCK_LAST,
+                payload=json.dumps(lock_last),
+                retain=True,
+            )
+        )
 
     # ``state`` payload: identity only, exactly the fields ``B/state`` carries. The
     # firmware omits an unspecified node name/role, so the defaults come from whatever

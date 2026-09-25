@@ -147,6 +147,10 @@ TOPIC_SECURITY: Final = "security"
 TOPIC_BACKUP_STATUS: Final = "backup/status"
 TOPIC_BACKUP_LAST: Final = "backup/last"
 TOPIC_LAST_AUTH: Final = "last_auth"
+# Origin of the most recent lock change. Published by the firmware immediately before the
+# state it explains, and retained, so a client can say *what* opened the door rather than
+# only that it opened.
+TOPIC_LOCK_LAST: Final = "lock/last"
 
 # Command subtopics (HMAC-authenticated, authoritative for HA V2)
 TOPIC_CMD_LOCK: Final = "command/lock"
@@ -172,6 +176,7 @@ JSON_SUBTOPICS: Final[frozenset[str]] = frozenset(
         TOPIC_HEALTH,
         TOPIC_BACKUP_LAST,
         TOPIC_LAST_AUTH,
+        TOPIC_LOCK_LAST,
     }
 )
 
@@ -318,6 +323,17 @@ KEY_TIMESTAMP: Final = "timestamp"
 KEY_AUTH_TYPE: Final = "type"
 KEY_AUTH_RESULT: Final = "result"
 
+# ``B/lock/last`` payload keys. ``current``/``target`` are deliberately not the health
+# shortcut's ``lock_current``/``lock_target``: this is the change, not the state.
+KEY_LOCK_CHANGE_CURRENT: Final = "current"
+KEY_LOCK_CHANGE_TARGET: Final = "target"
+KEY_LOCK_SOURCE: Final = "source"
+
+# Name the user gave a paired HomeKit controller. Present on ``B/last_auth`` only when they
+# gave one: naming an issuer is what opts it into being published, and the issuer id itself
+# is never sent.
+KEY_AUTH_ISSUER: Final = "issuer"
+
 # Command payload keys (exactly four; no ``action`` field).
 KEY_TS: Final = "ts"
 KEY_NONCE: Final = "nonce"
@@ -401,6 +417,42 @@ class AuthResult(StrEnum):
 
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
+
+
+class LockSource(StrEnum):
+    """What asked for a lock change (``B/lock/last.source``).
+
+    These are the firmware's own words, shared by the MQTT topic and the HTTP API so a
+    client needs one vocabulary for both.
+    """
+
+    HOMEKIT = "homekit"
+    HOMEKEY = "homekey"
+    MQTT = "mqtt"
+    API = "api"
+    DEVICE = "device"
+    # Reported when the firmware does not recognise the value it received. Kept so a
+    # corrupted event is named rather than silently mapped onto a real origin.
+    UNKNOWN = "unknown"
+
+
+# Sources Home Assistant should attribute itself, because it did not cause them. A change
+# caused by MQTT or the device API was very likely a Home Assistant service call, whose own
+# context is already pending on the entity and will be attached when it writes; overriding
+# that would replace a real user attribution with a vaguer one.
+DEVICE_INITIATED_SOURCES: Final[frozenset[str]] = frozenset(
+    {LockSource.HOMEKIT, LockSource.HOMEKEY, LockSource.DEVICE}
+)
+
+# How each source reads in the logbook.
+LOCK_SOURCE_LABELS: Final[dict[str, str]] = {
+    LockSource.HOMEKIT: "HomeKit",
+    LockSource.HOMEKEY: "a HomeKey credential",
+    LockSource.DEVICE: "the device",
+    LockSource.MQTT: "MQTT",
+    LockSource.API: "the device API",
+    LockSource.UNKNOWN: "an unknown source",
+}
 
 
 # Health field values.

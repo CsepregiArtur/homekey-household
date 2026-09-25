@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from homeassistant.core import callback
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
@@ -25,6 +26,20 @@ class HomeKeyBaseEntity(CoordinatorEntity[HomeKeyHouseholdCoordinator]):
     ) -> None:
         super().__init__(coordinator)
         self._node_id = node_id
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        """Write this entity's state, carrying any cause the coordinator established.
+
+        The context is what Home Assistant attributes a state change to. For a change made
+        at the door there is no user and no service call, so without this the activity log
+        can only say that no cause was recorded. ``async_set_context`` is the same
+        mechanism a service call uses, and the write below consumes it.
+        """
+        context = self.coordinator.pending_context(self._node_id)
+        if context is not None:
+            self.async_set_context(context)
+        super()._handle_coordinator_update()
 
     def _node(self) -> Node | None:
         return self.coordinator.get_node(self._node_id)

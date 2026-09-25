@@ -275,11 +275,36 @@ class TestLastAuthParsing:
             LastAuth.from_dict({"result": "MAYBE"}, HID, NID)
 
     def test_does_not_expect_credential_identifiers(self):
-        """issuerId/endpointId/APDU are not part of this topic's contract."""
+        """The raw issuer id, endpoint ids and APDU data are not part of this contract.
+
+        ``issuer`` is a different thing: it is the *name the user typed* for a controller
+        they paired, and the firmware only sends it when they typed one. The identifier it
+        names is never sent, so this stays a list of exactly four fields none of which can
+        carry an identifier.
+        """
         record = LastAuth.from_dict(json.loads(LAST_AUTH_JSON), HID, NID)
-        for forbidden in ("issuerId", "endpointId", "apdu", "credential_id"):
+        for forbidden in ("issuerId", "endpointId", "apdu", "credential_id", "issuer_id"):
             assert not hasattr(record, forbidden)
-        assert set(record.__dataclass_fields__) == {"auth_type", "result", "timestamp"}
+        assert set(record.__dataclass_fields__) == {
+            "auth_type",
+            "result",
+            "timestamp",
+            "issuer",
+        }
+
+    def test_a_label_cannot_be_filled_from_an_identifier(self):
+        """An issuer id must never end up standing in for the user's name.
+
+        The two are different fields with different meanings, and conflating them would
+        publish an identifier the contract promises never to send.
+        """
+        auth = LastAuth.from_dict(
+            {"type": "HomeKey", "result": "SUCCESS", "issuerId": "DEADBEEF"},
+            HID,
+            NID,
+        )
+        assert auth.issuer is None
+        assert "DEADBEEF" not in json.dumps(auth.__dict__)
 
     def test_extra_identifier_fields_are_ignored(self):
         """Even if a broker retained stale identifiers, they are not surfaced."""

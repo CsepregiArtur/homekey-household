@@ -21,25 +21,33 @@ from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
 from .const import (
+    DEVICE_INITIATED_SOURCES,
     DOMAIN,
+    ENTITY_LOCK,
     JSON_SUBTOPICS,
+    LOCK_SOURCE_LABELS,
+    LOCK_STATE_MAP,
     TOPIC_BACKUP_LAST,
     TOPIC_BACKUP_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
+    TOPIC_LOCK_LAST,
     TOPIC_SECURITY,
     TOPIC_STATE,
     TOPIC_STATUS,
     BackupOutcome,
+    LockState,
     SecurityState,
+    unique_id,
 )
 from .models import (
     BackupRecord,
     LastAuth,
+    LockChange,
     Node,
     NodeHealth,
     ValidationError,
@@ -100,6 +108,10 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         self._command_key_provider = command_key_provider
         self._reload_handle: Any = None
         self._pending_reload = False
+        # A cause established during the update currently being dispatched, handed to the
+        # entities so the state change they write carries it. Cleared once the update has
+        # been delivered: keeping it would attach the same cause to the next change too.
+        self._pending_contexts: dict[str, Context] = {}
         self._reload_paused = False
         # Injected by async_setup_entry once the MQTT client exists. Exactly one of
         # ``mqtt`` / ``direct`` is set, per the transport the entry was configured for.
@@ -203,7 +215,25 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             self._merge_node(Node.from_state(self.household_id, node_id, payload))
             updated = True
         elif subtopic == TOPIC_HEALTH and node_id:
-            self._ensure_node(node_id).health = NodeHealth.from_dict(
+            node = self._ensure_node(node_id)
+            previous_current = node.health.lock_current if node.health else None
+            health = NodeHealth.from_dict(payload, self.household_id, node_id)
+            node.health = health
+            # Attribution is a *description* of this update, not part of it. If it fails,
+            # the state still has to be published: dropping a real reading because a
+            # logbook entry could not be written would be a far worse failure than a
+            # change going unexplained.
+            try:
+                self._attribute_lock_change(node, previous_current, health)
+            except Exception:  # noqa: BLE001 - a description must not break ingestion
+                _LOGGER.exception(
+                    "Could not attribute a lock change for %s/%s",
+                    self.household_id,
+                    node_id,
+                )
+            updated = True
+        elif subtopic == TOPIC_LOCK_LAST and node_id:
+            self._ensure_node(node_id).lock_change = LockChange.from_dict(
                 payload, self.household_id, node_id
             )
             updated = True
@@ -231,6 +261,10 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             # state (including non-retained telemetry such as ``B/health``).
             self._pool_state()
             self.async_set_updated_data(self._data)
+            # The entities have now written their state, carrying any cause attached
+            # during this update. Dropping it keeps it from being attached again to a
+            # change it does not describe.
+            self._pending_contexts.clear()
 
     @staticmethod
     def _decode_json(payload: Any) -> Any:
@@ -340,6 +374,93 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         if value not in _VALID_BACKUP:
             raise ValidationError(f"backup/status: unknown value {value!r}")
         self._ensure_node(node_id).backup_status = value
+
+    # ------------------------------------------------------------------
+    # Attributing a lock change to its cause
+    # ------------------------------------------------------------------
+    def _attribute_lock_change(
+        self, node: Node, previous_current: int | None, health: NodeHealth
+    ) -> None:
+        """Give a lock change a cause, so the activity log can name it.
+
+        Home Assistant attributes a state change to whatever ``Context`` was attached when
+        the state was written. A change Home Assistant asked for already has one: the
+        service call's context is pending on the entity and is consumed by the very write
+        the change causes - which is why those read "Action used: Lock lock" under the
+        user's name. A change made at the door has nobody to attribute to, because the node
+        reports a number and nothing that identifies the person, so the node's own account
+        of what asked for the change is turned into a context here.
+        """
+        current = health.lock_current
+        if previous_current is None or current is None or current == previous_current:
+            # Not a change: either the first reading, with nothing to compare against, or a
+            # repeat. Attributing either would credit something that did not happen.
+            return
+
+        change = node.lock_change
+        if change is None or change.current != current:
+            # No cause on record for *this* change. Using the previous one would blame
+            # whatever happened last for what happened now.
+            return
+        if change.source not in DEVICE_INITIATED_SOURCES:
+            # Home Assistant already knows who asked, and overriding that would replace a
+            # real person with a vaguer description.
+            return
+
+        context = Context()
+        self._pending_contexts[node.node_id] = context
+        self._async_log_lock_cause(node, current, change.source, context)
+
+    @callback
+    def _async_log_lock_cause(
+        self, node: Node, current: int, source: str, context: Context
+    ) -> None:
+        """Record what changed the lock, sharing the context of the state change.
+
+        Fired with the same context the entities are about to write with, so the activity
+        view has something to name rather than reporting that no cause was recorded.
+        """
+        # Imported where it is used: the logbook is a companion, not a dependency, and this
+        # must not stop the integration working when it is not set up.
+        from homeassistant.components.logbook import async_log_entry
+
+        state = LOCK_STATE_MAP.get(current, LockState.UNKNOWN)
+        async_log_entry(
+            self.hass,
+            name="HomeKey",
+            message=(
+                f"{node.node_name} {state} by "
+                f"{LOCK_SOURCE_LABELS.get(source, source)}"
+            ),
+            domain=DOMAIN,
+            entity_id=self._lock_entity_id(node.node_id),
+            context=context,
+        )
+
+    def _lock_entity_id(self, node_id: str) -> str | None:
+        """Entity id of a node's lock, or ``None`` when it cannot be resolved.
+
+        Defensive on purpose: this only decides how a logbook entry is scoped, and the
+        entity registry may not even be loaded in every context this runs in.
+        """
+        from homeassistant.helpers import entity_registry as er
+
+        try:
+            registry = er.async_get(self.hass)
+            return registry.async_get_entity_id(
+                "lock", DOMAIN, unique_id(self.household_id, node_id, ENTITY_LOCK)
+            )
+        except Exception:  # noqa: BLE001 - scoping is cosmetic
+            _LOGGER.debug(
+                "Could not resolve the lock entity id for %s/%s",
+                self.household_id,
+                node_id,
+            )
+            return None
+
+    def pending_context(self, node_id: str) -> Context | None:
+        """Cause attached to the update being dispatched, for an entity to write with."""
+        return self._pending_contexts.get(node_id)
 
     # ------------------------------------------------------------------
     # Command helpers (fail closed when credentials are unavailable)
