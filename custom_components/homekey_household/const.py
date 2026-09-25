@@ -458,6 +458,12 @@ DEVICE_INITIATED_SOURCES: Final[frozenset[str]] = frozenset(
     {LockSource.HOMEKIT, LockSource.HOMEKEY, LockSource.DEVICE}
 )
 
+# How long to wait for a node to report the state a command asked for. Home Assistant shows
+# the requested state as soon as the call returns, so without this a command the node
+# rejected looks exactly like one it carried out - until the entity snaps back.
+COMMAND_CONFIRM_TIMEOUT_SECONDS: Final = 10.0
+COMMAND_CONFIRM_POLL_SECONDS: Final = 0.5
+
 # How long after it happened a lock event is still worth announcing. The retained event is
 # re-delivered on every connect - including the first connect after a Home Assistant
 # restart - and an event older than this window is history rather than news: the activity

@@ -17,7 +17,9 @@ yet the state is unknown.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 from homeassistant.components.lock import LockEntity
@@ -26,7 +28,13 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .const import ENTITY_LOCK, LockState, unique_id
+from .const import (
+    COMMAND_CONFIRM_POLL_SECONDS,
+    COMMAND_CONFIRM_TIMEOUT_SECONDS,
+    ENTITY_LOCK,
+    LockState,
+    unique_id,
+)
 from .coordinator import HomeKeyHouseholdCoordinator
 from .discovery import async_add_entities_for_nodes
 from .entity import HomeKeyBaseEntity
@@ -107,11 +115,29 @@ class HomeKeyLock(HomeKeyBaseEntity, LockEntity):
     async def async_unlock(self, **kwargs: Any) -> None:
         await self._async_send("unlock")
 
+    async def _async_wait_for_state(self, target: str) -> bool:
+        """Wait for the node to report the state the command asked for.
+
+        Home Assistant writes the requested state the moment the call returns, so a command
+        the node rejected is indistinguishable from one it carried out - until the next
+        report arrives and the entity snaps back, which is what "it worked, then jumped
+        back" means. Waiting for that report is what turns it into an answer.
+        """
+        deadline = time.monotonic() + COMMAND_CONFIRM_TIMEOUT_SECONDS
+        while True:
+            node = self._node()
+            if node is not None and node.lock_state == target:
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            await asyncio.sleep(COMMAND_CONFIRM_POLL_SECONDS)
+
     async def _async_send(self, action: str) -> None:
-        """Publish an authenticated command, surfacing failures to the user.
+        """Publish an authenticated command, and report whether the node carried it out.
 
         Fails closed: with no credential the command is not published at all.
         """
+        target = LockState.LOCKED if action == "lock" else LockState.UNLOCKED
         try:
             await self.coordinator.async_send_lock_command(self._node_id, action)
         except ValidationError as exc:
@@ -130,3 +156,15 @@ class HomeKeyLock(HomeKeyBaseEntity, LockEntity):
                 f"Failed to publish {action} command for "
                 f"{self.coordinator.household_id}/{self._node_id}"
             ) from exc
+
+        if await self._async_wait_for_state(target):
+            return
+
+        # Published, and nothing came back. Saying so is the whole point: the alternative
+        # is a call that reports success for a door that never moved.
+        raise HomeAssistantError(
+            f"The node did not report {target} within "
+            f"{COMMAND_CONFIRM_TIMEOUT_SECONDS:.0f} s of the {action} command. The command "
+            f"was published, so this usually means the node rejected it - its audit log "
+            f"records why."
+        )
