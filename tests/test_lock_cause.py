@@ -20,6 +20,7 @@ from homeassistant.const import EVENT_LOGBOOK_ENTRY
 
 from custom_components.homekey_household.const import (
     TOPIC_HEALTH,
+    TOPIC_LAST_AUTH,
     TOPIC_LOCK_LAST,
     TOPIC_STATE,
     TOPIC_STATUS,
@@ -50,6 +51,18 @@ def lock_last(
     payload: dict[str, object] = {"current": current, "source": source}
     if target is not None:
         payload["target"] = target
+    if timestamp is not None:
+        payload["timestamp"] = timestamp
+    return json.dumps(payload)
+
+
+def last_auth(
+    issuer: str | None = None, *, timestamp: int | None = None, result: str = "SUCCESS"
+) -> str:
+    """Build a firmware-faithful ``B/last_auth`` payload."""
+    payload: dict[str, object] = {"type": "HomeKey", "result": result}
+    if issuer is not None:
+        payload["issuer"] = issuer
     if timestamp is not None:
         payload["timestamp"] = timestamp
     return json.dumps(payload)
@@ -366,3 +379,105 @@ class TestAttribution:
 
         assert "locked" in logbook_entries[0]["message"]
         assert "HomeKit" in logbook_entries[0]["message"]
+
+
+class TestNamingThePerson:
+    """The activity log names whoever the node says it was, but only when it can prove it.
+
+    A name is used only when the node stamped the authorisation and the change it caused
+    from the same reading of its clock. Anything looser risks putting a person's name on a
+    change they had nothing to do with, which is worse than naming nobody at all.
+    """
+
+    async def test_a_named_tap_is_attributed_to_the_person(
+        self, coordinator, logbook_entries
+    ):
+        await register_node(coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_LOCKED))
+        )
+
+        # The node stamps a tap and the change it produced identically.
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LAST_AUTH, last_auth("Artur", timestamp=106))
+        )
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekey", timestamp=106)
+            )
+        )
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+        )
+
+        assert len(logbook_entries) == 1
+        assert logbook_entries[0]["message"] == "Gate unlocked by Artur"
+
+    async def test_an_unnamed_tap_names_the_mechanism(
+        self, coordinator, logbook_entries
+    ):
+        """A device nobody has named yet still says how the lock opened."""
+        await register_node(coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_LOCKED))
+        )
+
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LAST_AUTH, last_auth(timestamp=106))
+        )
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekey", timestamp=106)
+            )
+        )
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+        )
+
+        assert logbook_entries[0]["message"] == "Gate unlocked by a HomeKey credential"
+
+    async def test_an_earlier_authorisation_is_not_borrowed(
+        self, coordinator, logbook_entries
+    ):
+        """The tap is stamped 100 and the change 106: those are different events."""
+        await register_node(coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_LOCKED))
+        )
+
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LAST_AUTH, last_auth("Artur", timestamp=100))
+        )
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekey", timestamp=106)
+            )
+        )
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+        )
+
+        assert logbook_entries[0]["message"] == "Gate unlocked by a HomeKey credential"
+
+    async def test_a_homekit_change_never_borrows_a_persons_name(
+        self, coordinator, logbook_entries
+    ):
+        """HAP does not say which controller asked, so the mechanism is all there is."""
+        await register_node(coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_LOCKED))
+        )
+
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LAST_AUTH, last_auth("Artur", timestamp=106))
+        )
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit", timestamp=106)
+            )
+        )
+        await coordinator.async_handle_message(
+            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+        )
+
+        assert logbook_entries[0]["message"] == "Gate unlocked by HomeKit"

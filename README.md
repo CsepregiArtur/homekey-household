@@ -150,6 +150,12 @@ turns a device-originated change into a cause that shares the context of the sta
 so the activity log reads *"Gate unlocked by HomeKit"* instead of *"No cause was
 recorded"*.
 
+A HomeKey tap can say more than the mechanism, because the node also publishes `B/last_auth`
+with **the name you gave that controller**. When the node stamps the authorisation and the
+change it produced from the same reading of its clock, the activity log names the person:
+*"Gate unlocked by Artur"*. If the stamps differ, the mechanism is named instead — less
+specific, and never wrong.
+
 A change Home Assistant asked for is deliberately left alone. Its context is already
 pending on the entity and is consumed by the write the change causes, which is what puts
 your name there; overriding it with a source word would replace a real person with a vaguer

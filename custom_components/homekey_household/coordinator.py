@@ -40,6 +40,7 @@ from .const import (
     TOPIC_STATE,
     TOPIC_STATUS,
     BackupOutcome,
+    LockSource,
     LockState,
     SecurityState,
     unique_id,
@@ -409,11 +410,38 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
 
         context = Context()
         self._pending_contexts[node.node_id] = context
-        self._async_log_lock_cause(node, current, change.source, context)
+        self._async_log_lock_cause(
+            node, current, change.source, change.timestamp, context
+        )
 
     @callback
+    def _actor_for(self, node: Node, source: str, change_timestamp: str | None) -> str:
+        """What to name as the cause, preferring the person over the mechanism.
+
+        A HomeKey tap is the one cause that identifies somebody, and the node stamps the
+        authorisation and the lock change it produced from the same reading of its clock.
+        That shared stamp is what makes it safe to put a name here: matching on it means an
+        authorisation from an earlier tap is never attached to a change it had nothing to do
+        with. When the stamps differ, the mechanism is named instead - less specific, and
+        never wrong.
+        """
+        if source == LockSource.HOMEKEY and node.last_auth is not None:
+            auth = node.last_auth
+            if (
+                auth.issuer
+                and auth.timestamp is not None
+                and auth.timestamp == change_timestamp
+            ):
+                return auth.issuer
+        return LOCK_SOURCE_LABELS.get(source, source)
+
     def _async_log_lock_cause(
-        self, node: Node, current: int, source: str, context: Context
+        self,
+        node: Node,
+        current: int,
+        source: str,
+        change_timestamp: str | None,
+        context: Context,
     ) -> None:
         """Record what changed the lock, sharing the context of the state change.
 
@@ -430,7 +458,7 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             name="HomeKey",
             message=(
                 f"{node.node_name} {state} by "
-                f"{LOCK_SOURCE_LABELS.get(source, source)}"
+                f"{self._actor_for(node, source, change_timestamp)}"
             ),
             domain=DOMAIN,
             entity_id=self._lock_entity_id(node.node_id),

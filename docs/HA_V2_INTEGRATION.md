@@ -465,6 +465,13 @@ matches the new state, and the source is one Home Assistant did not cause
 Because the logbook entry and the state change share a context, the activity view can join
 them and name the cause.
 
+When the cause is a HomeKey tap, the entry names the **person** rather than the mechanism.
+The name the user gave that controller is on `B/last_auth`, and the node stamps both records
+from the same reading of its clock, so a stamp that matches is what identifies the
+authorisation as the cause of this particular change. A HomeKey change with no matching
+authorisation — and every `homekit` change, since HAP never says which controller asked —
+names the mechanism instead.
+
 The context is dropped once the update has been delivered, so it cannot be attached to an
 unrelated later change.
 
@@ -475,8 +482,10 @@ the service call's own context is already pending, and overriding it would repla
 person with a source word.
 * **A stale cause is never used.** If the recorded cause's `current` does not match the new
 state, it describes a different change and is discarded.
-* **Nothing is inferred.** No timing windows, no guessing from `B/last_auth`. If the node did
-not say, this integration does not claim to know.
+* **Nothing is inferred.** No timing windows, no guessing. The person's name is used only
+  when the node stamps `B/last_auth` and `B/lock/last` *identically* — the node's own
+  statement that the authorisation and the change are one event — and not because two
+  messages arrived close together and this integration decided that was close enough.
 * **Attribution cannot break ingestion.** The work is wrapped so a failure to write a
 logbook entry can never stop a real reading from being published.
 
