@@ -262,9 +262,10 @@ def resolve_identity(
         )
     if not household_id:
         raise DirectNoHouseholdError(
-            f"Node {node_id} has no household. Create one on the node's Web UI "
-            "(Household), then try again: the household is what its entities are "
-            "keyed on."
+            f"Node {node_id} has no household. On the node's Web UI open Provision, issue "
+            "a one-time code, then join with a household id - the Household page only "
+            "shows what is already there. The household is what its entities are keyed "
+            "on."
         )
     return str(household_id), str(node_id)
 
