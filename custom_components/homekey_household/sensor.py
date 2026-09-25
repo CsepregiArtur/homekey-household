@@ -219,7 +219,13 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
 
 
 class HomeKeySecuritySensor(HomeKeyBaseSensor):
-    """Security status from ``B/security`` — raw ``OK`` / ``WARNING``."""
+    """Security status from ``B/security``, with the reasons the node gave for it.
+
+    The state is a single word, and a word on its own does not answer *why*. The node
+    reports its findings right next to the verdict - which hardening features are switched
+    off, in its own words - so they are exposed here: a card that says WARNING without
+    saying why is a card that gets ignored, and the answer already arrived with the state.
+    """
 
     def __init__(self, coordinator: HomeKeyHouseholdCoordinator, node_id: str) -> None:
         super().__init__(
@@ -229,6 +235,24 @@ class HomeKeySecuritySensor(HomeKeyBaseSensor):
             lambda node: node.security,
             options=_SECURITY_OPTIONS,
         )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        attributes = super().extra_state_attributes
+        node = self._node()
+        health = node.health if node is not None else None
+        if health is None:
+            # No snapshot yet: the state is unknown rather than OK, and inventing findings
+            # for it would be worse than saying nothing.
+            return attributes
+        findings = _finding_lines(health.security_warnings)
+        attributes["security_all_ok"] = health.security_all_ok
+        # The raw text as published, for templates that want it verbatim...
+        attributes["security_warnings"] = health.security_warnings
+        # ...and the same findings one per line, which is what a card can show.
+        attributes["security_findings"] = findings
+        attributes["warning_count"] = len(findings)
+        return attributes
 
 
 class HomeKeyFirmwareSensor(HomeKeyBaseSensor):
@@ -301,3 +325,16 @@ def _age_seconds(when: datetime | None) -> int | None:
     if when is None:
         return None
     return max(0, int((datetime.now(UTC) - when).total_seconds()))
+
+
+def _finding_lines(warnings: str | None) -> list[str]:
+    """A node's security findings, one per line, in the node's own words.
+
+    The firmware joins them with real newlines. Splitting them here is the point of the
+    attribute that uses this: Home Assistant renders a list readably and a single run-on
+    line not at all, and the wording is passed through untouched - translating it here
+    would let this file drift away from what the node actually reported.
+    """
+    if not warnings:
+        return []
+    return [line.strip() for line in warnings.splitlines() if line.strip()]
