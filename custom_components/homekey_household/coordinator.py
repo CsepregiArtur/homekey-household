@@ -101,8 +101,13 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         self._reload_handle: Any = None
         self._pending_reload = False
         self._reload_paused = False
-        # Injected by async_setup_entry once the MQTT client exists.
+        # Injected by async_setup_entry once the MQTT client exists. Exactly one of
+        # ``mqtt`` / ``direct`` is set, per the transport the entry was configured for.
         self.mqtt: Any = None
+        # The direct poller, when the entry uses the broker-less transport. It feeds
+        # ``async_handle_message`` with the same messages the MQTT client would have
+        # produced, so nothing below this line needs to know which transport is live.
+        self.direct: Any = None
 
     # ------------------------------------------------------------------
     # State pooling across config-entry reloads
@@ -348,15 +353,26 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
 
     @property
     def command_control_enabled(self) -> bool:
-        """True when HMAC-authenticated commands can be published."""
+        """True when a lock command can actually be delivered.
+
+        The MQTT transport authenticates each command with a key derived from the
+        household recovery secret, so it needs that key. The direct transport
+        authenticates with the device credential over a pinned TLS connection, so it
+        needs no key and must not be reported as unable to control the lock.
+        """
+        if self.direct is not None:
+            return True
         return bool(self.command_key())
 
     async def async_send_lock_command(self, node_id: str, action: str) -> Any:
-        """Publish an authenticated lock/unlock command for a node.
+        """Deliver a lock/unlock command over whichever transport is configured.
 
-        Fails closed (raises :class:`ValidationError`) when no key material is
-        configured, so an unauthenticated command is never published.
+        The MQTT path fails closed (raises :class:`ValidationError`) when no key
+        material is configured, so an unauthenticated command is never published.
         """
+        if self.direct is not None:
+            return await self._async_send_direct_command(node_id, action)
+
         key = self.command_key()
         if not key:
             raise ValidationError(
@@ -368,6 +384,32 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         if action == "lock":
             return await self.mqtt.async_lock(self.household_id, node_id, key)
         return await self.mqtt.async_unlock(self.household_id, node_id, key)
+
+    async def _async_send_direct_command(self, node_id: str, action: str) -> Any:
+        """Send a lock command to the node's own API, then re-read its state.
+
+        The command is the node's own operation, so the state it reports afterwards is
+        the truth; the follow-up poll is what makes the entity reflect a jam or a
+        failed mechanism instead of the request. A failed refresh is logged and
+        swallowed: the command was delivered, and the next scheduled poll will catch
+        up regardless.
+        """
+        poller = self.direct
+        if action not in ("lock", "unlock"):
+            raise ValidationError(f"unsupported action: {action!r}")
+
+        result = await poller.client.async_lock(action)
+        try:
+            await poller.async_poll_once()
+        except Exception as err:  # noqa: BLE001 - a refresh failure must not hide success
+            _LOGGER.debug(
+                "Could not refresh %s/%s after a %s command: %s",
+                self.household_id,
+                node_id,
+                action,
+                err,
+            )
+        return result
 
     async def async_lock_node(self, node_id: str) -> Any:
         return await self.async_send_lock_command(node_id, "lock")

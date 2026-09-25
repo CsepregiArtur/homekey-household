@@ -1,7 +1,15 @@
 # HomeKey Household — Home Assistant V2 Integration
 
-Home Assistant custom integration (`homekey_household`) for the **HomeKey-ESP32
-household MQTT API, firmware 0.10.0**.
+Home Assistant custom integration (`homekey_household`) for **HomeKey-ESP32** nodes,
+over one of two transports:
+
+* **`mqtt`** — the documented household MQTT API, **firmware 0.10.0**. This is what
+  the bulk of this document describes.
+* **`direct`** — the node's own HTTPS API (`/api/ha/*`), with its self-signed
+  certificate pinned by fingerprint. No broker involved. See §15.
+
+Both produce identical coordinator state and therefore identical entities; nothing below
+the coordinator knows which one is in use.
 
 > **Local HomeKey unlock remains entirely on the ESP32.** Home Assistant, MQTT,
 > and internet connectivity are *not* dependencies for local HomeKey access. The
@@ -51,6 +59,7 @@ MQTT message → topic parser (mqtt.parse_topic)
 | `command.py` | Key derivation, canonical input, HMAC-SHA256, nonce/request ids |
 | `credential.py` | Secure command-key storage via HA `Store` |
 | `mqtt.py` | Transport abstraction, topic parsing, command publication |
+| `direct.py` | Broker-less transport: certificate pinning, `/api/ha` client, poller |
 | `coordinator.py` | Node registry, state merge, availability, fail-closed commands |
 | `entity.py` | Stable device identity + shared attributes |
 | `lock.py` | Lock entity using the HMAC command topics |
@@ -59,9 +68,10 @@ MQTT message → topic parser (mqtt.parse_topic)
 | `config_flow.py` | Household + credential setup (reuses HA MQTT) |
 | `diagnostics.py` | Redacted diagnostics |
 
-**Transport**: the integration reuses the Home Assistant core **MQTT
+**Transport**: by default the integration reuses the Home Assistant core **MQTT
 integration**. It never opens a second broker connection and does not duplicate
-broker configuration.
+broker configuration. The optional `direct` transport (§15) replaces the broker
+entirely for a single node.
 
 ---
 
@@ -407,3 +417,99 @@ logger:
 | One MQTT will | Shared LWT reused, no second will |
 | Multi-node / multi-household | Identity is `household_id + node_id` throughout |
 | Legacy topics excluded | No `P/*` command topic published; `P/homekey/auth` unused for V2 auth |
+
+---
+
+## 15. The broker-less (direct) transport
+
+### Why it exists
+
+The MQTT transport requires a broker to be installed, running, reachable and
+correctly configured before a single node appears. A node sitting on the same LAN
+does not need any of that, and if the broker is the only reason Home Assistant
+cannot see it, then the broker is the problem.
+
+### Discovery
+
+The node advertises `_homekey._tcp` over mDNS with TXT records `id`, `name`,
+`model`, `ver`, `proto`, `fp`, `cfg` and `tls`. The integration declares
+`zeroconf: ["_homekey._tcp.local."]` in its manifest, which is what makes Home
+Assistant offer it as a discovered card.
+
+Discovery leads to the **direct** transport: a node that announces itself on the
+LAN can be talked to without a broker, so making broker setup the first thing it
+asks for would defeat the point. The MQTT transport remains available from the
+manual "Add integration" path.
+
+A node advertising `proto` other than `1`, `tls` other than `1`, or no `fp` is
+refused at discovery with its own reason. Refusing early is deliberate: the
+firmware will not serve state in the clear, so a node without TLS would be
+discovered and then fail every request, and a node without a fingerprint has
+nothing to pin it to.
+
+### Trust: the fingerprint *is* the trust anchor
+
+The node generates its own key and self-signed certificate on first boot, so every
+unit is unique. There is no CA to chain to and no subject that can match a DHCP
+address. That means:
+
+* the fingerprint shown on the discovery card must be compared against the value
+  in the node's own Web UI (Misc → Security) — if they differ, stop;
+* `pinned_ssl_context()` loads the confirmed certificate as the **only** trusted
+  root with `CERT_REQUIRED`, so a node presenting anything else is rejected by the
+  TLS layer itself, before any credential is sent. Comparing fingerprints after a
+  request has already been sent would be too late;
+* the check is repeated on **every startup**, so a device that was swapped or
+  factory reset is refused rather than trusted because it once was.
+
+The startup distinction matters for the error the user sees: a fingerprint
+mismatch stops the entry with a permanent error naming both values, while an
+unreachable node is retried with backoff, and a rejected credential starts the
+reauthentication flow.
+
+### Authorisation
+
+Commands are authorised by the node's own Web UI credential, over that pinned TLS
+connection — the same boundary that already protects `/reboot_device`,
+`/recovery/export` and `/backup/restore`. The credential is stored in the config
+entry, exactly as the core MQTT integration stores a broker password, because the
+node has to be authenticated on every poll.
+
+HMAC command signing is *not* used on this path. The MQTT path signs commands
+because a broker is untrusted; here the peer is pinned and the channel is
+authenticated, so a second signature scheme would add code without adding a
+guarantee — and would mean asking for a recovery secret the transport does not
+need.
+
+### Reading state
+
+`GET /api/ha/state` returns the node's identity plus the documented health
+document, byte for byte the same JSON the MQTT transport publishes on `B/health`.
+A `direct.py` helper restates that response as the *messages MQTT would have
+delivered* and hands them to the same coordinator ingestion path, so every parser,
+validator and merge rule is shared rather than reimplemented. Two transports
+cannot read the same firmware differently, because there is only one reader.
+
+The firmware's documented stubs (`network`, `certificate`) and its
+"lock not reported" sentinel are preserved or omitted, never filled in with
+something plausible-looking.
+
+### Availability and polling
+
+MQTT pushes; this transport polls every 30 s. A single slow response does **not**
+mark the node unavailable — the ESP32 serves TLS from the same chip that runs
+HomeKit, so an occasional slow handshake is normal, and flapping a lock entity to
+unavailable on it would be a worse lie than reporting the last known state. Three
+consecutive failures are required, and the node is marked offline through the same
+path a retained `B/status` message would use.
+
+### Limits
+
+* One entry covers **one node**. A household reaching Home Assistant this way
+  produces one entry per node, where the MQTT transport covers a whole household in
+  one.
+* Backup, restore, audit and provisioning are HTTP-only on the firmware and are not
+  exposed as entities on either transport.
+* An entry is refused if its household is already configured, over either
+  transport: entity unique ids are `<household>_<node>_<entity>`, so a second entry
+  would produce a duplicate set that the user could not tell apart.

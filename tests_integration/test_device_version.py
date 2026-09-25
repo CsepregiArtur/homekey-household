@@ -19,12 +19,24 @@ DOMAIN = "homekey_household"
 
 
 async def test_integration_version_comes_from_manifest(hass):
-    """The Integrations page version is the manifest version."""
+    """The Integrations page version is the manifest version.
+
+    Compared against ``pyproject.toml`` rather than a hard-coded literal: the two
+    declare the same thing for the same release, so pinning either to a fixed
+    string would only mean every release fails this test for no reason.
+    """
+    import tomllib
+    from pathlib import Path
+
     from homeassistant import loader
 
     manifest = (await loader.async_get_integration(hass, DOMAIN)).manifest
     assert manifest["version"]  # a version key must exist for custom integrations
-    assert manifest["version"] == "2.2.3"
+
+    project = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    )
+    assert manifest["version"] == project["project"]["version"]
 
 
 async def test_device_reports_firmware_as_sw_version(hass, mqtt_client):

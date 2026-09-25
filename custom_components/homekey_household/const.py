@@ -42,6 +42,79 @@ DEFAULT_LEGACY_CLIENT_ID_PREFIX: Final = "ESP_"
 DEFAULT_COMMAND_CONTROL: Final = True
 
 # ---------------------------------------------------------------------------
+# Transport selection
+# ---------------------------------------------------------------------------
+# Two ways to reach a node, chosen per config entry:
+#
+# ``mqtt``
+#   The documented household MQTT API, through Home Assistant's core MQTT
+#   integration. Push-based, covers a whole household, needs a broker.
+#
+# ``direct``
+#   The node's own HTTPS API (``/api/ha/*``). Works with no broker at all, but
+#   covers exactly one node and has to poll.
+#
+# Both produce identical coordinator state, so entities do not know or care which
+# one is in use.
+CONF_TRANSPORT: Final = "transport"
+TRANSPORT_MQTT: Final = "mqtt"
+TRANSPORT_DIRECT: Final = "direct"
+
+# Direct transport configuration.
+CONF_HOST: Final = "host"
+CONF_PORT: Final = "port"
+# SHA-256 fingerprint of the certificate the node presented, in the colon-separated
+# uppercase form the firmware itself produces. This is the trust anchor: see direct.py.
+CONF_FINGERPRINT: Final = "fingerprint"
+CONF_USERNAME: Final = "username"
+CONF_PASSWORD: Final = "password"
+# Identity captured at discovery time, so the entry is meaningful before the node
+# has been polled successfully (and so the user can see what they added).
+CONF_NODE_ID: Final = "node_id"
+CONF_NODE_NAME: Final = "node_name"
+CONF_MODEL: Final = "model"
+
+# ---------------------------------------------------------------------------
+# mDNS / Zeroconf discovery
+# ---------------------------------------------------------------------------
+# Service type advertised by the firmware (DiscoveryAdvertiser: "_homekey" + "_tcp").
+ZEROCONF_TYPE: Final = "_homekey._tcp.local."
+
+# TXT record keys, spelled exactly as the firmware writes them.
+ZEROCONF_KEY_ID: Final = "id"
+ZEROCONF_KEY_NAME: Final = "name"
+ZEROCONF_KEY_MODEL: Final = "model"
+ZEROCONF_KEY_VERSION: Final = "ver"
+ZEROCONF_KEY_PROTOCOL: Final = "proto"
+ZEROCONF_KEY_FINGERPRINT: Final = "fp"
+ZEROCONF_KEY_CONFIG: Final = "cfg"
+ZEROCONF_KEY_TLS: Final = "tls"
+
+# The mDNS ``cfg`` value meaning the node accepts authenticated configuration
+# writes. Used to avoid advertising a read-only node as writable.
+ZEROCONF_CFG_READWRITE: Final = "rw"
+
+# API protocol version this integration understands (firmware kHaProtocolVersion).
+HA_API_PROTOCOL: Final = 1
+
+# ---------------------------------------------------------------------------
+# Direct transport behaviour
+# ---------------------------------------------------------------------------
+# MQTT is push; the direct API is not, so a poll interval is unavoidable. The node
+# is an ESP32 also serving HomeKit, so this is deliberately unhurried.
+DIRECT_POLL_INTERVAL_SECONDS: Final = 30
+# A single failed poll must not flap a lock entity to unavailable: the node serves
+# TLS from one core while also running HomeKit, so an occasional slow response is
+# expected rather than a fault. Only a run of failures marks the node offline.
+DIRECT_OFFLINE_AFTER_FAILURES: Final = 3
+
+# The firmware serves its API over TLS only, so there is no plaintext fallback port.
+DEFAULT_HTTPS_PORT: Final = 443
+# Shipped default of the firmware's Web UI credential (defaults.h). The first-run
+# setup screen replaces the password; the user name usually stays as this.
+DEFAULT_WEB_USERNAME: Final = "admin"
+
+# ---------------------------------------------------------------------------
 # Official MQTT integration (express setup path)
 # ---------------------------------------------------------------------------
 # Domain of the Home Assistant core MQTT integration used as the transport.

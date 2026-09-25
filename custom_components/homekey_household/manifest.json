@@ -3,9 +3,11 @@
   "name": "HomeKey Household",
   "codeowners": [],
   "config_flow": true,
+  "dependencies": ["http"],
   "documentation": "https://github.com/example/homekey-household",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/example/homekey-household/issues",
   "requirements": [],
-  "version": "2.2.3"
+  "version": "2.3.0",
+  "zeroconf": ["_homekey._tcp.local."]
 }

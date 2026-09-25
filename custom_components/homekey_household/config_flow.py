@@ -27,35 +27,102 @@ import logging
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.config_entries import (
+    ConfigEntry,
+    ConfigFlow,
+    ConfigFlowResult,
+    OptionsFlow,
+)
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
     CONF_COMMAND_CONTROL,
+    CONF_FINGERPRINT,
+    CONF_HOST,
     CONF_HOUSEHOLD_ID,
     CONF_HOUSEHOLD_NAME,
     CONF_LEGACY_CLIENT_ID_PREFIX,
+    CONF_MODEL,
     CONF_MQTT_BROKER,
     CONF_MQTT_PASSWORD,
     CONF_MQTT_PORT,
     CONF_MQTT_PROTOCOL,
     CONF_MQTT_USERNAME,
+    CONF_NODE_ID,
+    CONF_NODE_NAME,
+    CONF_PASSWORD,
+    CONF_PORT,
     CONF_RECOVERY_SECRET,
     CONF_SALT,
+    CONF_TRANSPORT,
+    CONF_USERNAME,
     DEFAULT_COMMAND_CONTROL,
+    DEFAULT_HTTPS_PORT,
     DEFAULT_LEGACY_CLIENT_ID_PREFIX,
     DEFAULT_MQTT_BROKER,
     DEFAULT_MQTT_PORT,
     DEFAULT_MQTT_PROTOCOL,
+    DEFAULT_WEB_USERNAME,
     DOMAIN,
+    HA_API_PROTOCOL,
     MQTT_DOMAIN,
+    TRANSPORT_DIRECT,
+    ZEROCONF_KEY_FINGERPRINT,
+    ZEROCONF_KEY_ID,
+    ZEROCONF_KEY_MODEL,
+    ZEROCONF_KEY_NAME,
+    ZEROCONF_KEY_PROTOCOL,
+    ZEROCONF_KEY_TLS,
+    ZEROCONF_KEY_VERSION,
 )
 from .credential import CommandKeyStore
+from .direct import (
+    DirectAuthError,
+    DirectFingerprintMismatch,
+    DirectNoHouseholdError,
+    DirectProbe,
+    DirectProtocolError,
+    DirectTlsUnavailableError,
+    DirectTransportError,
+    async_connect_node,
+    normalise_fingerprint,
+)
 from .models import ValidationError, validate_id
 
 _LOGGER = logging.getLogger(__name__)
 
 DOCS_URL = "https://github.com/example/homekey-household"
+
+# Which form error each direct-transport failure maps to. Keyed by the exception's
+# exact type, so the most specific reason wins; anything else is a connection
+# problem. DirectFingerprintMismatch and friends are subclasses of
+# DirectTransportError, which is why the lookup is by exact type rather than by
+# isinstance order.
+_DIRECT_ERROR_KEYS: dict[type[BaseException], str] = {
+    DirectFingerprintMismatch: "fingerprint_mismatch",
+    DirectAuthError: "invalid_auth",
+    DirectTlsUnavailableError: "tls_required",
+    DirectNoHouseholdError: "no_household",
+    DirectProtocolError: "unsupported_protocol",
+    DirectTransportError: "cannot_connect",
+}
+
+
+def _txt_properties(discovery_info: Any) -> dict[str, str]:
+    """Normalise an mDNS TXT record to plain strings.
+
+    Zeroconf returns the values as bytes, and it omits keys whose value is empty.
+    Treating a missing key and an empty one identically keeps the checks below
+    readable.
+    """
+    raw = getattr(discovery_info, "properties", None) or {}
+    properties: dict[str, str] = {}
+    for key, value in raw.items():
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="replace")
+        properties[str(key)] = "" if value is None else str(value)
+    return properties
 
 
 async def async_validate_mqtt(hass: HomeAssistant) -> bool:
@@ -128,6 +195,9 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         # MQTT entry the user just created, so the express/add-on paths arrive
         # pre-configured but the user can still change anything.
         self._household_defaults: dict[str, Any] = {}
+        # What mDNS advertised, carried from the discovery step to the credential
+        # step. Empty for every flow that did not start from discovery.
+        self._discovery: dict[str, Any] = {}
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -142,6 +212,255 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                 options.append("mqtt_addon")
             return self.async_show_menu(step_id="user", menu_options=options)
         return await self.async_step_household()
+
+    # ------------------------------------------------------------------
+    # Zeroconf discovery (the broker-less, or "direct", transport)
+    # ------------------------------------------------------------------
+    async def async_step_zeroconf(self, discovery_info: Any) -> ConfigFlowResult:
+        """Handle a node advertising ``_homekey._tcp`` on the local network.
+
+        Discovery leads to the *direct* transport. A node that announces itself on the
+        LAN can be talked to without any broker - that is the entire reason it
+        announces itself - so making broker setup the first thing a discovered node
+        asks for would defeat the point. The MQTT transport remains available from the
+        manual "Add integration" path, and both produce identical entities.
+        """
+        properties = _txt_properties(discovery_info)
+
+        protocol = properties.get(ZEROCONF_KEY_PROTOCOL) or ""
+        if protocol != str(HA_API_PROTOCOL):
+            return self.async_abort(
+                reason="unsupported_protocol",
+                description_placeholders={
+                    "protocol": protocol or "unknown",
+                    "supported": str(HA_API_PROTOCOL),
+                },
+            )
+
+        # The firmware refuses to serve state or configuration in the clear, so a node
+        # discovered without TLS would be discovered and then fail every request. Its
+        # own reason, because the fix (enable HTTPS on the node) is specific.
+        if properties.get(ZEROCONF_KEY_TLS) != "1":
+            return self.async_abort(reason="tls_required")
+
+        fingerprint = properties.get(ZEROCONF_KEY_FINGERPRINT) or ""
+        if not fingerprint:
+            return self.async_abort(reason="no_fingerprint")
+
+        host = getattr(discovery_info, "host", None) or getattr(
+            discovery_info, "hostname", None
+        )
+        port = getattr(discovery_info, "port", None)
+        if not host or not port:
+            return self.async_abort(reason="cannot_connect")
+
+        # The certificate fingerprint is what actually identifies this device: a node
+        # id can be reassigned and an address definitely changes, but the pinned
+        # certificate is unique to one unit.
+        await self.async_set_unique_id(f"{DOMAIN}_{normalise_fingerprint(fingerprint)}")
+        self._abort_if_unique_id_configured(
+            updates={CONF_HOST: str(host), CONF_PORT: int(port)}
+        )
+
+        self._discovery = {
+            CONF_HOST: str(host),
+            CONF_PORT: int(port),
+            CONF_FINGERPRINT: fingerprint,
+            CONF_NODE_ID: properties.get(ZEROCONF_KEY_ID) or "",
+            CONF_NODE_NAME: properties.get(ZEROCONF_KEY_NAME) or "",
+            CONF_MODEL: properties.get(ZEROCONF_KEY_MODEL) or "",
+            "version": properties.get(ZEROCONF_KEY_VERSION) or "",
+        }
+        # Shown on the discovery card, before the user opens the flow.
+        self.context["title_placeholders"] = {
+            "name": self._discovery[CONF_NODE_NAME]
+            or self._discovery[CONF_NODE_ID]
+            or "HomeKey node"
+        }
+        return await self.async_step_direct()
+
+    async def async_step_direct(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Confirm the advertised certificate and collect the node's credentials."""
+        discovery = dict(self._discovery)
+        if not discovery:
+            # Only reachable if the flow is resumed without its discovery context.
+            return self.async_abort(reason="cannot_connect")
+
+        errors: dict[str, str] = {}
+        presented = ""
+
+        if user_input is not None:
+            username = (user_input.get(CONF_USERNAME) or "").strip()
+            password = user_input.get(CONF_PASSWORD) or ""
+            if not username or not password:
+                errors["base"] = "invalid_auth"
+            else:
+                try:
+                    probe = await self._async_probe_direct(
+                        discovery[CONF_HOST],
+                        discovery[CONF_PORT],
+                        discovery[CONF_FINGERPRINT],
+                        username,
+                        password,
+                    )
+                except DirectTransportError as err:
+                    errors["base"] = _DIRECT_ERROR_KEYS.get(type(err), "cannot_connect")
+                    # Show what the node actually presented. "The certificate differs"
+                    # is not actionable; the two values side by side are.
+                    presented = getattr(err, "actual", "") or ""
+                else:
+                    return await self._async_create_direct_entry(
+                        probe, username, password
+                    )
+
+        return self.async_show_form(
+            step_id="direct",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_USERNAME, default=DEFAULT_WEB_USERNAME
+                    ): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "name": discovery.get(CONF_NODE_NAME)
+                or discovery.get(CONF_NODE_ID)
+                or "HomeKey node",
+                "model": discovery.get(CONF_MODEL) or "HomeKey-ESP32",
+                "version": discovery.get("version") or "unknown",
+                "host": discovery[CONF_HOST],
+                "port": str(discovery[CONF_PORT]),
+                "expected": discovery[CONF_FINGERPRINT],
+                "presented": presented or "(not checked yet)",
+                "docs": DOCS_URL,
+            },
+        )
+
+    async def _async_probe_direct(
+        self, host: str, port: int, expected: str, username: str, password: str
+    ) -> DirectProbe:
+        """Pin the certificate, authenticate, and read the node's own identity.
+
+        Delegates to the same implementation entry setup uses, so what is verified when
+        a node is added is exactly what is verified on every later start. Raises a
+        :class:`DirectTransportError` subclass for every way this can fail, so the
+        caller only has to map exception types to form errors.
+        """
+        return await async_connect_node(
+            self.hass.async_add_executor_job,
+            async_get_clientsession(self.hass),
+            host=host,
+            port=port,
+            expected_fingerprint=expected,
+            username=username,
+            password=password,
+        )
+
+    async def _async_create_direct_entry(
+        self, probe: DirectProbe, username: str, password: str
+    ) -> ConfigFlowResult:
+        """Create the entry, refusing to duplicate a household's entities."""
+        # Entity unique ids are ``<household_id>_<node_id>_<entity>``, so a household
+        # that is already configured - over either transport - would produce a second,
+        # identical set of entities. Refuse rather than let Home Assistant log
+        # duplicates that the user cannot remove.
+        for entry in self._async_current_entries():
+            if entry.data.get(CONF_HOUSEHOLD_ID) == probe.household_id:
+                return self.async_abort(
+                    reason="household_already_configured",
+                    description_placeholders={
+                        "household_id": probe.household_id,
+                        "title": entry.title,
+                    },
+                )
+
+        # The credential is stored in the entry, exactly as the core MQTT integration
+        # stores a broker password: the direct transport has to authenticate on every
+        # poll, so it cannot be kept only for the lifetime of this flow. The recovery
+        # secret is a different matter and is still never persisted (see credential).
+        return self.async_create_entry(
+            title=probe.node_name or probe.node_id,
+            data={
+                CONF_TRANSPORT: TRANSPORT_DIRECT,
+                CONF_HOUSEHOLD_ID: probe.household_id,
+                CONF_HOUSEHOLD_NAME: probe.household_name,
+                CONF_NODE_ID: probe.node_id,
+                CONF_NODE_NAME: probe.node_name,
+                CONF_MODEL: probe.model,
+                CONF_HOST: self._discovery[CONF_HOST],
+                CONF_PORT: self._discovery[CONF_PORT],
+                CONF_FINGERPRINT: probe.fingerprint,
+                CONF_USERNAME: username,
+                CONF_PASSWORD: password,
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Reauthentication (the node's Web UI credential changed)
+    # ------------------------------------------------------------------
+    async def async_step_reauth(self, entry_data: dict[str, Any]) -> ConfigFlowResult:
+        """Start reauthentication after the node rejected the stored credential."""
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Replace the stored credential, but only after proving the new one works."""
+        entry = self._get_reauth_entry()
+        host: str = entry.data.get(CONF_HOST, "")
+        port: int = int(entry.data.get(CONF_PORT, DEFAULT_HTTPS_PORT))
+        expected: str = entry.data.get(CONF_FINGERPRINT, "")
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            username = (user_input.get(CONF_USERNAME) or "").strip()
+            password = user_input.get(CONF_PASSWORD) or ""
+            if not username or not password:
+                errors["base"] = "invalid_auth"
+            else:
+                try:
+                    # The stored fingerprint is still required to match. A node whose
+                    # certificate changed is a different trust decision, so it is
+                    # deliberately not something an ordinary password reset re-pins;
+                    # that is reported and the user removes and re-adds the entry.
+                    await self._async_probe_direct(
+                        host, port, expected, username, password
+                    )
+                except DirectTransportError as err:
+                    errors["base"] = _DIRECT_ERROR_KEYS.get(type(err), "cannot_connect")
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        data_updates={
+                            CONF_USERNAME: username,
+                            CONF_PASSWORD: password,
+                        },
+                    )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(
+                        CONF_USERNAME,
+                        default=entry.data.get(CONF_USERNAME)
+                        or DEFAULT_WEB_USERNAME,
+                    ): str,
+                    vol.Required(CONF_PASSWORD): str,
+                }
+            ),
+            errors=errors,
+            description_placeholders={
+                "host": host,
+                "port": str(port),
+                "expected": expected,
+                "docs": DOCS_URL,
+            },
+        )
 
     # ------------------------------------------------------------------
     # Guided walkthrough (no automatic configuration)
@@ -505,8 +824,24 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: Any) -> OptionsFlow:
+    def async_get_options_flow(config_entry: ConfigEntry) -> OptionsFlow:
         return HomeKeyHouseholdOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_supports_options_flow(cls, config_entry: ConfigEntry) -> bool:
+        """Options exist only for the MQTT transport.
+
+        A direct entry has nothing to tune: its one adjustable piece is the stored
+        credential, and that changes through reauthentication, which also proves the
+        new credential works before replacing a working one. Offering the MQTT options
+        (command key, shared-LWT prefix) on a broker-less entry would be two settings
+        that silently do nothing.
+
+        Home Assistant asks this before offering the Configure button, so a direct
+        entry simply has no options UI rather than an empty one.
+        """
+        return config_entry.data.get(CONF_TRANSPORT) != TRANSPORT_DIRECT
 
 
 class HomeKeyHouseholdOptionsFlow(OptionsFlow):

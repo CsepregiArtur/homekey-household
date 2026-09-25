@@ -2,12 +2,36 @@
   "config": {
     "step": {
       "user": {
-        "title": "Set up MQTT",
-        "description": "HomeKey Household uses the official Home Assistant MQTT integration as its transport. MQTT is not configured yet — choose how you want to continue.",
+        "title": "Set up HomeKey Household",
+        "description": "HomeKey Household can reach a node either through the official MQTT integration (a whole household, push-based, needs a broker) or directly over the node's own HTTPS API (one node, polled, no broker at all).\n\nA node that is already online is discovered automatically — check Settings → Devices & Services for a discovered card first. Continue here to set up the MQTT transport by hand. For the broker-less transport, make sure mDNS works on your network so the node can be discovered; otherwise add it over MQTT.",
         "menu_options": {
           "mqtt_guide": "Walk me through the MQTT setup",
           "mqtt_express": "Configure MQTT for me (express)",
           "mqtt_addon": "Use the MQTT add-on (Home Assistant OS only)"
+        }
+      },
+      "zeroconf": {
+        "title": "HomeKey node {name}",
+        "description": "A HomeKey node advertising itself on the local network."
+      },
+      "direct": {
+        "title": "Connect to HomeKey node",
+        "description": "Found **{name}** ({model}) at {host}:{port}, firmware {version}.\n\nIt will be reached directly over HTTPS, with no broker, using the certificate fingerprint it advertises:\n\n`{expected}`\n\nThe node's Web UI shows the same value under Misc → Security. **If the two differ, stop** — nothing else about this connection can be trusted.\n\nCertificate the node presented when last checked: `{presented}`\n\nEnter the credentials of the node's own Web UI (not your Home Assistant ones). The lock is controlled over this same authenticated connection, so these credentials are what protects it.",
+        "data": {
+          "username": "Web UI user name",
+          "password": "Web UI password"
+        },
+        "data_description": {
+          "username": "The user name configured on the node's Web UI (default admin).",
+          "password": "The password you set during the node's first-run setup. It is stored in this integration entry, exactly as the official MQTT integration stores a broker password, because the node has to be authenticated on every poll."
+        }
+      },
+      "reauth_confirm": {
+        "title": "Reauthenticate with the node",
+        "description": "The node at {host}:{port} no longer accepts the stored credentials. Enter the current Web UI credentials.\n\nThe pinned certificate fingerprint is still required to match:\n\n`{expected}`\n\nIf the node was replaced or factory reset, its certificate has changed and this form cannot help: remove the integration entry and add it again so the new certificate is confirmed.",
+        "data": {
+          "username": "Web UI user name",
+          "password": "Web UI password"
         }
       },
       "mqtt_guide": {
@@ -52,11 +76,19 @@
       "mqtt_addon_unavailable": "Supervisor did not offer the Mosquitto broker add-on for installation. Install the 'Mosquitto broker' add-on from Settings → Add-ons, start it, then choose this option again — or use the express setup instead.",
       "addon_info_failed": "Supervisor could not read the Mosquitto broker add-on's information. Open Settings → Add-ons → Mosquitto broker and check that it is installed correctly, then try again.",
       "addon_connection_failed": "The Mosquitto broker add-on did not come up in time. Open Settings → Add-ons → Mosquitto broker, confirm it is running, then try again. If it keeps failing, check the add-on's own log for errors.",
-      "addon_start_failed": "The Mosquitto broker add-on started, but Home Assistant could not connect to it. Open the add-on's Log tab and fix any startup errors (for example, a port conflict or a broken configuration), then try again. Using the express setup with your own broker credentials also works."
+      "addon_start_failed": "The Mosquitto broker add-on started, but Home Assistant could not connect to it. Open the add-on's Log tab and fix any startup errors (for example, a port conflict or a broken configuration), then try again. Using the express setup with your own broker credentials also works.",
+      "fingerprint_mismatch": "The certificate the node presented is not the one it advertises over mDNS. Do not continue: the device may have been replaced or factory reset, or something on the network may be impersonating it. Compare the two fingerprints above with the value in the node's Web UI (Misc → Security). If the node was legitimately replaced or reset, wait for it to be discovered again and add it from that card.",
+      "tls_required": "The node is not serving HTTPS. Its firmware refuses to send state or configuration in the clear, so there is nothing to connect to yet. Enable HTTPS on the node's Web UI (Misc → Security) and try again.",
+      "no_household": "The node has no household yet. Everything else is working, but a household is what its entities are keyed on (and what makes its credentials meaningful). Create one on the node's Web UI, then try again.",
+      "unsupported_protocol": "The node speaks a different API protocol version than this integration understands. Update the integration, or update the node's firmware."
     },
     "abort": {
       "already_configured": "This household is already configured.",
-      "not_hassio": "The MQTT add-on option is only available on Home Assistant OS or a Supervised installation."
+      "not_hassio": "The MQTT add-on option is only available on Home Assistant OS or a Supervised installation.",
+      "tls_required": "The discovered node is not serving HTTPS. Enable HTTPS on the node's Web UI (Misc → Security), then add it again.",
+      "no_fingerprint": "The discovered node did not advertise a certificate fingerprint, so there is nothing to pin it to. Update the node's firmware, then add it again.",
+      "unsupported_protocol": "The discovered node speaks API protocol {protocol}; this integration understands {supported}. Update the integration, or update the node's firmware.",
+      "household_already_configured": "Household {household_id} is already configured as “{title}”. Its entities are keyed on the household, so adding this node again would create a duplicate set. Remove the existing entry first if you want to switch this household to the broker-less connection."
     }
   },
   "options": {
