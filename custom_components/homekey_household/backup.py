@@ -331,6 +331,12 @@ async def async_back_up_entry(
     runtime = hass.data.get(DOMAIN, {}).get(entry_id)
     entry = getattr(runtime, "config_entry", None)
     if runtime is None or entry is None:
+        # Nothing to back up. A run somebody asked for says so: returning quietly here is
+        # how a button ends up reporting success for work that never happened.
+        if explicit:
+            raise ServiceValidationError(
+                f"Entry {entry_id} is not set up, so there is nothing to back up"
+            )
         return
     entry_data = entry_backup_settings(runtime)
     if not backup_client_for(entry_data):
