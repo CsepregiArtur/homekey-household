@@ -25,7 +25,7 @@ from typing import Any
 from homeassistant.components.lock import LockEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
+from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
@@ -161,8 +161,10 @@ class HomeKeyLock(HomeKeyBaseEntity, LockEntity):
             return
 
         # Published, and nothing came back. Saying so is the whole point: the alternative
-        # is a call that reports success for a door that never moved.
-        raise HomeAssistantError(
+        # is a call that reports success for a door that never moved. Raised as a service
+        # validation error rather than a plain HomeAssistantError so the reason reaches the
+        # caller - a script, an automation, or the API - instead of a generic server error.
+        raise ServiceValidationError(
             f"The node did not report {target} within "
             f"{COMMAND_CONFIRM_TIMEOUT_SECONDS:.0f} s of the {action} command. The command "
             f"was published, so this usually means the node rejected it - its audit log "
