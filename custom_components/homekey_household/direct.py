@@ -503,6 +503,16 @@ class DirectClient:
             raise DirectProtocolError("The node did not return a backup")
         return blob
 
+    async def async_restore_backup(self, recovery_secret: str, backup: str) -> dict[str, Any]:
+        """Hand a backup and the recovery secret to a node, and let it restore itself.
+
+        The secret both authorises the restore and decrypts the backup - it is the key the
+        backup was sealed with - so it is passed straight to the node and never stored.
+        """
+        return await self._request(
+            "POST", "/backup/restore", json={"secret": recovery_secret, "backup": backup}
+        )
+
     async def async_get_backup_info(self) -> dict[str, Any]:
         """The node's summary of its last backup: outcome, time and hash.
 

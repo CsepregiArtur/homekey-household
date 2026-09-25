@@ -22,6 +22,7 @@ from typing import Any
 
 import aiohttp
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.storage import Store
 
@@ -37,6 +38,7 @@ from .const import (
     DEFAULT_HTTPS_PORT,
     DOMAIN,
     SERVICE_CREATE_BACKUP,
+    SERVICE_RESTORE_BACKUP,
 )
 from .direct import (
     DirectClient,
@@ -254,7 +256,7 @@ async def _async_node_backup_time(client: DirectClient) -> int | None:
 
 
 async def async_setup_backups(hass: HomeAssistant) -> None:
-    """Register the backup service and start the schedule."""
+    """Register the backup services and start the schedule."""
     store = BackupStore(hass)
     await store.async_load()
     hass.data.setdefault(DOMAIN, {})[BACKUP_STORE_KEY] = store
@@ -262,16 +264,33 @@ async def async_setup_backups(hass: HomeAssistant) -> None:
     async def _back_up_now(call: Any) -> None:
         entry_ids = _target_entry_ids(hass, call.data)
         if not entry_ids:
-            _LOGGER.warning(
-                "No HomeKey entry can be backed up: one needs the node's address, its "
-                "certificate fingerprint and its Web UI credentials (%s)",
-                "set them under Configure on the entry",
+            raise ServiceValidationError(
+                "No HomeKey entry can be backed up: a node needs its address, its "
+                "certificate fingerprint and its Web UI credentials. Set them under "
+                "Configure on the entry."
             )
-            return
         for entry_id in entry_ids:
-            await async_back_up_entry(hass, store, entry_id)
+            await async_back_up_entry(hass, store, entry_id, explicit=True)
+
+    async def _restore_now(call: Any) -> None:
+        entry_ids = _target_entry_ids(hass, call.data)
+        if not entry_ids:
+            raise ServiceValidationError(
+                "No HomeKey entry can be restored: a node needs its address, its "
+                "certificate fingerprint and its Web UI credentials. Set them under "
+                "Configure on the entry."
+            )
+        for entry_id in entry_ids:
+            await async_restore_entry(
+                hass,
+                store,
+                entry_id,
+                recovery_secret=str(call.data.get("recovery_secret") or ""),
+                backup_hex=call.data.get("backup"),
+            )
 
     hass.services.async_register(DOMAIN, SERVICE_CREATE_BACKUP, _back_up_now)
+    hass.services.async_register(DOMAIN, SERVICE_RESTORE_BACKUP, _restore_now)
 
     async def _scheduled(_now: datetime) -> None:
         for entry_id in _target_entry_ids(hass, {}):
@@ -296,17 +315,35 @@ def _target_entry_ids(hass: HomeAssistant, data: dict[str, Any]) -> list[str]:
     return entry_ids
 
 
-async def async_back_up_entry(hass: HomeAssistant, store: BackupStore, entry_id: str) -> None:
-    """Take one backup for one entry, logging rather than raising on failure.
+async def async_back_up_entry(
+    hass: HomeAssistant,
+    store: BackupStore,
+    entry_id: str,
+    *,
+    explicit: bool = False,
+) -> None:
+    """Take one backup for one entry.
 
-    A scheduled job that raises is a job that stops being useful, and a node that is
-    briefly unreachable is not an error worth failing a service call over.
+    The scheduled run logs and moves on: a job that raises is a job that stops being
+    useful, and a node that is briefly unreachable is not worth a failure. A run somebody
+    asked for says what went wrong instead of appearing to do nothing.
     """
     runtime = hass.data.get(DOMAIN, {}).get(entry_id)
     entry = getattr(runtime, "config_entry", None)
     if runtime is None or entry is None:
         return
     entry_data = entry_backup_settings(runtime)
+    if not backup_client_for(entry_data):
+        # A backup travels over the node's own API. Saying that is more useful than the
+        # failure a missing address would produce further down.
+        _LOGGER.warning("No API access configured for entry %s; skipping backup", entry_id)
+        if explicit:
+            raise ServiceValidationError(
+                "This node cannot be reached for a backup: its address, certificate "
+                "fingerprint and Web UI credentials are not configured. Set them under "
+                "Configure on the entry."
+            )
+        return
 
     transport = getattr(runtime, "transport", None)
     running_client = transport.client if isinstance(transport, DirectPoller) else None
@@ -320,6 +357,10 @@ async def async_back_up_entry(hass: HomeAssistant, store: BackupStore, entry_id:
         )
     except DirectTransportError as err:
         _LOGGER.warning("Could not back up the node for entry %s: %s", entry_id, err)
+        if explicit:
+            raise ServiceValidationError(
+                f"Could not back up the node for {entry_id}: {err}"
+            ) from err
         return
 
     await store.async_add(backup)
@@ -329,6 +370,93 @@ async def async_back_up_entry(hass: HomeAssistant, store: BackupStore, entry_id:
         len(backup.blob),
         len(store.for_node(backup.node_id)),
     )
+
+
+async def async_restore_entry(
+    hass: HomeAssistant,
+    store: BackupStore,
+    entry_id: str,
+    *,
+    recovery_secret: str,
+    backup_hex: str | None = None,
+) -> None:
+    """Restore a node from a backup, using a stored copy unless one is handed over.
+
+    The backup is useless without the recovery secret it was sealed with, so the secret is
+    required: it is what proves the right to rejoin the household, and it is passed to the
+    node rather than kept here.
+    """
+    if not recovery_secret:
+        raise ServiceValidationError(
+            "A recovery secret is required to restore: it is the key the backup was "
+            "sealed with."
+        )
+
+    runtime = hass.data.get(DOMAIN, {}).get(entry_id)
+    entry = getattr(runtime, "config_entry", None)
+    if runtime is None or entry is None:
+        raise ServiceValidationError(f"Unknown HomeKey entry: {entry_id}")
+    entry_data = entry_backup_settings(runtime)
+    if not backup_client_for(entry_data):
+        raise ServiceValidationError(
+            "This node cannot be reached for a restore: its address, certificate "
+            "fingerprint and Web UI credentials are not configured. Set them under "
+            "Configure on the entry."
+        )
+
+    blob = backup_hex
+    if not blob:
+        household_id = str(entry_data.get("household_id") or "")
+        stored = [b for b in store.backups if not household_id or b.household_id == household_id]
+        if not stored:
+            raise ServiceValidationError(
+                "No stored backup to restore from: pass one with 'backup', or back the "
+                "node up first."
+            )
+        # Newest first: the most recent copy is the one most likely to describe the
+        # household as the user last left it.
+        blob = stored[-1].blob
+
+    transport = getattr(runtime, "transport", None)
+    running_client = transport.client if isinstance(transport, DirectPoller) else None
+    try:
+        await _async_restore_on_node(
+            hass, entry_data, recovery_secret=recovery_secret, blob=blob, client=running_client
+        )
+    except DirectTransportError as err:
+        _LOGGER.warning("Could not restore the node for entry %s: %s", entry_id, err)
+        raise ServiceValidationError(
+            f"Could not restore the node for {entry_id}: {err}"
+        ) from err
+
+    _LOGGER.info(
+        "Restored %s from a backup (%d bytes of hex)",
+        entry_data.get("household_id") or entry_id,
+        len(blob),
+    )
+
+
+async def _async_restore_on_node(
+    hass: HomeAssistant,
+    entry_data: dict[str, Any],
+    *,
+    recovery_secret: str,
+    blob: str,
+    client: DirectClient | None = None,
+) -> None:
+    """Send the restore to the node, connecting first when no client is running."""
+    if client is None:
+        probe = await async_connect_node(
+            hass.async_add_executor_job,
+            _session_for(hass),
+            host=str(entry_data[CONF_HOST]),
+            port=int(entry_data.get(CONF_PORT, DEFAULT_HTTPS_PORT)),
+            expected_fingerprint=str(entry_data[CONF_FINGERPRINT]),
+            username=str(entry_data[CONF_USERNAME]),
+            password=str(entry_data[CONF_PASSWORD]),
+        )
+        client = probe.client
+    await client.async_restore_backup(recovery_secret, blob)
 
 
 def _session_for(hass: HomeAssistant) -> aiohttp.ClientSession:

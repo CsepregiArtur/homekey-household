@@ -77,6 +77,7 @@ PLATFORMS: list[Platform] = [
     Platform.LOCK,
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
+    Platform.BUTTON,
 ]
 
 type HomeKeyConfigEntry = ConfigEntry[HomeKeyRuntime]

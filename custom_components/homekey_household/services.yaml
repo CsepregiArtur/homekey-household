@@ -15,3 +15,37 @@ create_backup:
       selector:
         config_entry:
           integration: homekey_household
+
+restore_backup:
+  name: Restore a node from a backup
+  description: >-
+    Hand a backup to a node so it can restore itself. The backup is encrypted with a key
+    derived from the household recovery secret, so the secret is required: it both proves
+    the right to rejoin the household and decrypts the backup. Without a backup to pass,
+    the newest stored copy for the household is used.
+  fields:
+    config_entry_id:
+      name: Node
+      description: Which node to restore.
+      required: false
+      selector:
+        config_entry:
+          integration: homekey_household
+    recovery_secret:
+      name: Recovery secret
+      description: >-
+        The household recovery secret, exactly as the node exported it. It is sent to the
+        node and not stored.
+      required: true
+      example: 9f2c...
+      selector:
+        text:
+    backup:
+      name: Backup
+      description: >-
+        The backup as hex, to restore from a specific copy. Leave empty to use the newest
+        one held for this household.
+      required: false
+      selector:
+        text:
+          multiline: true

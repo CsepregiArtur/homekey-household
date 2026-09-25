@@ -165,6 +165,9 @@ BACKUP_KEEP: Final = 7
 BACKUP_INTERVAL_SECONDS: Final = 24 * 60 * 60
 BACKUP_STORE_VERSION: Final = 1
 SERVICE_CREATE_BACKUP: Final = "create_backup"
+SERVICE_RESTORE_BACKUP: Final = "restore_backup"
+# Translation key of the per-node "back up now" button.
+ENTITY_BUTTON_BACKUP: Final = "backup_now"
 
 # Command subtopics (HMAC-authenticated, authoritative for HA V2)
 TOPIC_CMD_LOCK: Final = "command/lock"

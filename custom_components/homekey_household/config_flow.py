@@ -34,6 +34,7 @@ from homeassistant.config_entries import (
     OptionsFlow,
 )
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
@@ -894,6 +895,11 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
         entry = self.config_entry
         household_id: str = entry.data[CONF_HOUSEHOLD_ID]
 
+        current_options = entry.options
+        current_password = entry.data.get(CONF_PASSWORD) or current_options.get(
+            CONF_PASSWORD, ""
+        )
+
         if user_input is not None:
             recovery_secret = user_input.get(CONF_RECOVERY_SECRET)
             salt = user_input.get(CONF_SALT)
@@ -919,10 +925,17 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                     CONF_COMMAND_CONTROL: user_input.get(
                         CONF_COMMAND_CONTROL, DEFAULT_COMMAND_CONTROL
                     ),
+                    CONF_HOST: (user_input.get(CONF_HOST) or "").strip(),
+                    CONF_PORT: int(user_input.get(CONF_PORT) or DEFAULT_HTTPS_PORT),
+                    CONF_USERNAME: user_input.get(CONF_USERNAME) or "",
+                    # Blank keeps the stored password: options are shown in the UI, and a
+                    # password that round-trips through a form is a password on screen.
+                    CONF_PASSWORD: user_input.get(CONF_PASSWORD)
+                    or current_password,
+                    CONF_FINGERPRINT: (user_input.get(CONF_FINGERPRINT) or "").strip(),
                 }
                 return self.async_create_entry(data=new_options)
 
-        current_options = entry.options
         return self.async_show_form(
             step_id="init",
             data_schema=vol.Schema(
@@ -940,6 +953,34 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                         default=current_options.get(
                             CONF_LEGACY_CLIENT_ID_PREFIX,
                             DEFAULT_LEGACY_CLIENT_ID_PREFIX,
+                        ),
+                    ): str,
+                    # The node's own API, which is the only thing a backup or a restore
+                    # can travel over. An MQTT entry has no reason to know it otherwise,
+                    # so it is optional and only used for those.
+                    vol.Optional(
+                        CONF_HOST,
+                        default=current_options.get(
+                            CONF_HOST, entry.data.get(CONF_HOST, "")
+                        ),
+                    ): str,
+                    vol.Optional(
+                        CONF_PORT,
+                        default=current_options.get(
+                            CONF_PORT, entry.data.get(CONF_PORT, DEFAULT_HTTPS_PORT)
+                        ),
+                    ): cv.port,
+                    vol.Optional(
+                        CONF_USERNAME,
+                        default=current_options.get(
+                            CONF_USERNAME, entry.data.get(CONF_USERNAME, DEFAULT_WEB_USERNAME)
+                        ),
+                    ): str,
+                    vol.Optional(CONF_PASSWORD): str,
+                    vol.Optional(
+                        CONF_FINGERPRINT,
+                        default=current_options.get(
+                            CONF_FINGERPRINT, entry.data.get(CONF_FINGERPRINT, "")
                         ),
                     ): str,
                 }

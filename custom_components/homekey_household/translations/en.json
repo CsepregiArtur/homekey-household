@@ -103,11 +103,18 @@
           "recovery_secret": "Recovery secret (leave blank to keep current key)",
           "salt": "KDF salt (the node's recovery_salt, hex)",
           "command_control": "Enable authenticated lock control",
-          "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)"
+          "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)",
+          "host": "Node address (for backups and restores)",
+          "port": "Node HTTPS port",
+          "username": "Web UI username",
+          "password": "Web UI password (leave blank to keep the current one)",
+          "fingerprint": "Certificate fingerprint (SHA-256, colon separated)"
         },
         "data_description": {
           "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic.",
-          "salt": "The node holds the recovery secret and this salt as bytes and reports both as hex. Both are needed to derive the command key: a secret without the matching salt derives a key the node rejects with bad_mac, and the rejection is not visible from here. The node prints its own salt as recovery_salt on its Household page."
+          "salt": "The node holds the recovery secret and this salt as bytes and reports both as hex. Both are needed to derive the command key: a secret without the matching salt derives a key the node rejects with bad_mac, and the rejection is not visible from here. The node prints its own salt as recovery_salt on its Household page.",
+          "host": "Optional. A backup or a restore travels over the node's own HTTPS API, not over MQTT, so it needs the node's address, its certificate fingerprint and its Web UI credentials. Leave empty and backup or restore will say they cannot reach the node.",
+          "fingerprint": "The SHA-256 fingerprint the node reports on its own API page. It is what pins the connection: without it, the integration will not send a credential to whatever answers at that address."
         }
       }
     },
@@ -141,6 +148,11 @@
       },
       "last_auth": {
         "name": "Last HomeKey authentication"
+      }
+    },
+    "button": {
+      "backup_now": {
+        "name": "Back up now"
       }
     }
   },
