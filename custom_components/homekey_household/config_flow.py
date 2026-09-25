@@ -92,7 +92,7 @@ from .models import ValidationError, validate_id
 
 _LOGGER = logging.getLogger(__name__)
 
-DOCS_URL = "https://github.com/example/homekey-household"
+DOCS_URL = "https://github.com/CsepregiArtur/homekey-household"
 
 # Which form error each direct-transport failure maps to. Keyed by the exception's
 # exact type, so the most specific reason wins; anything else is a connection
@@ -101,12 +101,31 @@ DOCS_URL = "https://github.com/example/homekey-household"
 # isinstance order.
 _DIRECT_ERROR_KEYS: dict[type[BaseException], str] = {
     DirectFingerprintMismatch: "fingerprint_mismatch",
-    DirectAuthError: "invalid_auth",
+    DirectAuthError: "node_auth_failed",
     DirectTlsUnavailableError: "tls_required",
     DirectNoHouseholdError: "no_household",
     DirectProtocolError: "unsupported_protocol",
-    DirectTransportError: "cannot_connect",
+    DirectTransportError: "node_unreachable",
 }
+
+
+def _preferred_host(discovery_info: Any) -> str | None:
+    """Return the address to reach the node on, preferring a literal one.
+
+    Zeroconf hands over both a resolved address and the service's own name, and the
+    name is not usable everywhere: a ``.local`` hostname only resolves if the process
+    has mDNS resolution, which a Home Assistant container generally does not. A node
+    is equally reachable by address, so the address is always the better choice, and
+    this order is the difference between a setup that works and one that reports a
+    connection failure against a node sitting on the network in plain sight.
+    """
+    for candidate in getattr(discovery_info, "ip_addresses", None) or []:
+        text = str(candidate)
+        if text and ":" not in text:  # IPv4 needs no resolver at all
+            return text
+    return getattr(discovery_info, "host", None) or getattr(
+        discovery_info, "hostname", None
+    )
 
 
 def _txt_properties(discovery_info: Any) -> dict[str, str]:
@@ -247,12 +266,10 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         if not fingerprint:
             return self.async_abort(reason="no_fingerprint")
 
-        host = getattr(discovery_info, "host", None) or getattr(
-            discovery_info, "hostname", None
-        )
+        host = _preferred_host(discovery_info)
         port = getattr(discovery_info, "port", None)
         if not host or not port:
-            return self.async_abort(reason="cannot_connect")
+            return self.async_abort(reason="node_address_unknown")
 
         # The certificate fingerprint is what actually identifies this device: a node
         # id can be reassigned and an address definitely changes, but the pinned
@@ -286,7 +303,7 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
         discovery = dict(self._discovery)
         if not discovery:
             # Only reachable if the flow is resumed without its discovery context.
-            return self.async_abort(reason="cannot_connect")
+            return self.async_abort(reason="node_address_unknown")
 
         errors: dict[str, str] = {}
         presented = ""
@@ -295,7 +312,7 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             username = (user_input.get(CONF_USERNAME) or "").strip()
             password = user_input.get(CONF_PASSWORD) or ""
             if not username or not password:
-                errors["base"] = "invalid_auth"
+                errors["base"] = "node_auth_failed"
             else:
                 try:
                     probe = await self._async_probe_direct(
@@ -306,7 +323,20 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                         password,
                     )
                 except DirectTransportError as err:
-                    errors["base"] = _DIRECT_ERROR_KEYS.get(type(err), "cannot_connect")
+                    errors["base"] = _DIRECT_ERROR_KEYS.get(
+                        type(err), "node_unreachable"
+                    )
+                    # The form error is for the user; this line is for whoever has to
+                    # work out why a node that answers in a browser could not be
+                    # reached from here. The address that was actually tried is the
+                    # part otherwise invisible from the message alone.
+                    _LOGGER.warning(
+                        "Direct transport: %s:%s failed with %s: %s",
+                        discovery[CONF_HOST],
+                        discovery[CONF_PORT],
+                        type(err).__name__,
+                        err,
+                    )
                     # Show what the node actually presented. "The certificate differs"
                     # is not actionable; the two values side by side are.
                     presented = getattr(err, "actual", "") or ""
@@ -420,7 +450,7 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
             username = (user_input.get(CONF_USERNAME) or "").strip()
             password = user_input.get(CONF_PASSWORD) or ""
             if not username or not password:
-                errors["base"] = "invalid_auth"
+                errors["base"] = "node_auth_failed"
             else:
                 try:
                     # The stored fingerprint is still required to match. A node whose
@@ -431,7 +461,16 @@ class HomeKeyHouseholdConfigFlow(ConfigFlow, domain=DOMAIN):
                         host, port, expected, username, password
                     )
                 except DirectTransportError as err:
-                    errors["base"] = _DIRECT_ERROR_KEYS.get(type(err), "cannot_connect")
+                    errors["base"] = _DIRECT_ERROR_KEYS.get(
+                        type(err), "node_unreachable"
+                    )
+                    _LOGGER.warning(
+                        "Direct transport: %s:%s failed with %s: %s",
+                        host,
+                        port,
+                        type(err).__name__,
+                        err,
+                    )
                 else:
                     return self.async_update_reload_and_abort(
                         entry,

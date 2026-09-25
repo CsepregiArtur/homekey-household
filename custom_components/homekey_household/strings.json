@@ -77,6 +77,8 @@
       "addon_info_failed": "Supervisor could not read the Mosquitto broker add-on's information. Open Settings → Add-ons → Mosquitto broker and check that it is installed correctly, then try again.",
       "addon_connection_failed": "The Mosquitto broker add-on did not come up in time. Open Settings → Add-ons → Mosquitto broker, confirm it is running, then try again. If it keeps failing, check the add-on's own log for errors.",
       "addon_start_failed": "The Mosquitto broker add-on started, but Home Assistant could not connect to it. Open the add-on's Log tab and fix any startup errors (for example, a port conflict or a broken configuration), then try again. Using the express setup with your own broker credentials also works.",
+      "node_unreachable": "Home Assistant could not reach the node at that address. Check that it is powered on and on the same network, then try again.",
+      "node_auth_failed": "The node rejected those credentials. Enter the username and password for the node's own Web UI (Misc -> Security on the node), not your Home Assistant ones.",
       "fingerprint_mismatch": "The certificate the node presented is not the one it advertises over mDNS. Do not continue: the device may have been replaced or factory reset, or something on the network may be impersonating it. Compare the two fingerprints above with the value in the node's Web UI (Misc → Security). If the node was legitimately replaced or reset, wait for it to be discovered again and add it from that card.",
       "tls_required": "The node is not serving HTTPS. Its firmware refuses to send state or configuration in the clear, so there is nothing to connect to yet. Enable HTTPS on the node's Web UI (Misc → Security) and try again.",
       "no_household": "The node has no household yet. Everything else is working, but a household is what its entities are keyed on (and what makes its credentials meaningful). On the node's Web UI open Provision, issue a one-time code, then join with a household id, and try again.",
@@ -88,6 +90,7 @@
       "tls_required": "The discovered node is not serving HTTPS. Enable HTTPS on the node's Web UI (Misc → Security), then add it again.",
       "no_fingerprint": "The discovered node did not advertise a certificate fingerprint, so there is nothing to pin it to. Update the node's firmware, then add it again.",
       "unsupported_protocol": "The discovered node speaks API protocol {protocol}; this integration understands {supported}. Update the integration, or update the node's firmware.",
+      "node_address_unknown": "The node's advertisement did not include a usable address, so there is nothing to connect to. Reboot the node so that it advertises itself again, then discover it once more.",
       "household_already_configured": "Household {household_id} is already configured as “{title}”. Its entities are keyed on the household, so adding this node again would create a duplicate set. Remove the existing entry first if you want to switch this household to the broker-less connection."
     }
   },
