@@ -1,0 +1,5 @@
+# Hardware test evidence is generated per run and can contain device state.
+# It is redacted on write, but it is runtime output, not source: never commit it.
+evidence/
+__pycache__/
+.pytest_cache/

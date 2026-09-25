@@ -18,6 +18,7 @@ import os
 import signal
 import socket
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -48,7 +49,12 @@ from helpers import (
 )
 
 DOMAIN = "homekey_household"
-MOSQUITTO_CONF = Path(__file__).resolve().parents[1] / "tools" / "integration" / "mosquitto.test.conf"
+MOSQUITTO_CONF = (
+    Path(__file__).resolve().parents[1]
+    / "tools"
+    / "integration"
+    / "mosquitto.test.conf"
+)
 
 
 def _wait_for_port(host: str, port: int, timeout: float = 15.0) -> bool:
@@ -123,7 +129,9 @@ async def _unavailable(hass, entity_id: str, timeout: float = 15.0) -> bool:
     return False
 
 
-async def _state_becomes(hass, entity_id: str, value: str, timeout: float = 20.0) -> bool:
+async def _state_becomes(
+    hass, entity_id: str, value: str, timeout: float = 20.0
+) -> bool:
     deadline = asyncio.get_running_loop().time() + timeout
     while asyncio.get_running_loop().time() < deadline:
         state = hass.states.get(entity_id)
@@ -151,7 +159,12 @@ class UncleanNode:
     async def start(self) -> None:
         self.proc = subprocess.Popen(  # noqa: S603 - fixed script + argv
             [
-                os.environ.get("LWT_HELPER_PYTHON", "python3"),
+                # Must be the SAME interpreter running these tests: it is the
+                # one with paho-mqtt installed. Falling back to PATH's ``python3``
+                # picks up the system interpreter, which typically has no paho,
+                # and the helper then dies with ModuleNotFoundError before it can
+                # register its Will.
+                os.environ.get("LWT_HELPER_PYTHON") or sys.executable,
                 str(LWT_HELPER),
                 MQTT_BROKER,
                 str(MQTT_PORT),
@@ -177,8 +190,7 @@ class UncleanNode:
             if '"online_sent"' in line:
                 return
         raise AssertionError(
-            f"LWT helper did not come online; events={events!r} "
-            f"rc={self.proc.poll()}"
+            f"LWT helper did not come online; events={events!r} rc={self.proc.poll()}"
         )
 
     def kill_unclean(self) -> None:
@@ -315,7 +327,9 @@ class TestMqttDisconnectReconnect:
             "node did not recover to online after reconnect"
         )
 
-    async def test_no_duplicates_after_reconnect(self, hass, restartable_broker, mqtt_client):
+    async def test_no_duplicates_after_reconnect(
+        self, hass, restartable_broker, mqtt_client
+    ):
         await _seed_credential(hass, HOUSEHOLD)
         await _setup_entry(hass, HOUSEHOLD)
         await publish_telemetry(mqtt_client, HOUSEHOLD, NODE_GATE, "Gate Test")
@@ -338,7 +352,9 @@ class TestMqttDisconnectReconnect:
         assert after_ents == before_ents, "entity registry changed after reconnect"
         assert after_devs == before_devs, "device registry changed after reconnect"
 
-    async def test_command_works_after_reconnect(self, hass, restartable_broker, mqtt_client):
+    async def test_command_works_after_reconnect(
+        self, hass, restartable_broker, mqtt_client
+    ):
         await _seed_credential(hass, HOUSEHOLD)
         await _setup_entry(hass, HOUSEHOLD)
         await publish_telemetry(mqtt_client, HOUSEHOLD, NODE_GATE, "Gate Test")
@@ -365,7 +381,9 @@ class TestMqttDisconnectReconnect:
         assert set(captured.body) == {"ts", "nonce", "req_id", "mac"}
         assert captured.qos == 1 and captured.retain is False
 
-    async def test_retained_state_survives_broker_restart(self, hass, restartable_broker, mqtt_client):
+    async def test_retained_state_survives_broker_restart(
+        self, hass, restartable_broker, mqtt_client
+    ):
         """Retained messages are broker state; mosquitto keeps them in memory."""
         await _seed_credential(hass, HOUSEHOLD)
         await _setup_entry(hass, HOUSEHOLD)
@@ -378,7 +396,10 @@ class TestMqttDisconnectReconnect:
 
         async with aiomqtt.Client(MQTT_BROKER, MQTT_PORT) as node:
             await node.publish(
-                f"{node_base(HOUSEHOLD, NODE_GATE)}/security", "WARNING", qos=0, retain=True
+                f"{node_base(HOUSEHOLD, NODE_GATE)}/security",
+                "WARNING",
+                qos=0,
+                retain=True,
             )
         restartable_broker.stop()
         restartable_broker.start()
@@ -522,7 +543,9 @@ class TestRetainedVsNonRetained:
     async def test_health_restores_state_when_republished(self, hass, mqtt_client):
         await _seed_credential(hass, HOUSEHOLD)
         entry = await _setup_entry(hass, HOUSEHOLD)
-        await publish_telemetry(mqtt_client, HOUSEHOLD, NODE_GATE, "Gate Test", lock_current=1)
+        await publish_telemetry(
+            mqtt_client, HOUSEHOLD, NODE_GATE, "Gate Test", lock_current=1
+        )
         await settle(hass)
         entity_id = await _wait_for_lock_entity(hass)
 
