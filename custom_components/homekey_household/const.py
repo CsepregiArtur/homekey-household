@@ -37,10 +37,6 @@ CONF_SALT: Final = "salt"
 CONF_COMMAND_CONTROL: Final = "command_control"
 # Legacy MQTT client-id prefix, used only for the *shared LWT availability topic*.
 CONF_LEGACY_CLIENT_ID_PREFIX: Final = "legacy_client_id_prefix"
-# Another lock entity to record causes on, for a node that is also exposed by the
-# firmware's own MQTT discovery. Empty by default: the integration's own lock entity is the
-# one it owns, and writing into a second entity's activity log is opt-in.
-CONF_CAUSE_ENTITY: Final = "cause_entity"
 
 DEFAULT_LEGACY_CLIENT_ID_PREFIX: Final = "ESP_"
 DEFAULT_COMMAND_CONTROL: Final = True

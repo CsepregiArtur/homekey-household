@@ -25,7 +25,6 @@ from homeassistant.const import EVENT_LOGBOOK_ENTRY
 from homeassistant.core import callback
 
 from custom_components.homekey_household.const import (
-    CONF_CAUSE_ENTITY,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
     TOPIC_LOCK_LAST,
@@ -580,17 +579,3 @@ class TestChangeTheSnapshotNeverSees:
         await coordinator.async_handle_message(make_message(TOPIC_LOCK_LAST, payload))
 
         assert len(logbook_entries) == 1
-
-    async def test_a_second_lock_entity_can_be_told_the_cause_too(
-        self, hass, logbook_entries
-    ):
-        """A node that also publishes its own MQTT discovery has two lock entities."""
-        entry = FakeConfigEntry(options={CONF_CAUSE_ENTITY: "lock.hk_lock"})
-        coordinator = HomeKeyHouseholdCoordinator(hass, entry, household_id=HID)
-        await register_node(coordinator)
-
-        await coordinator.async_handle_message(
-            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
-        )
-
-        assert [item["entity_id"] for item in logbook_entries] == ["lock.hk_lock"]

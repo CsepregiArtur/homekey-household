@@ -26,7 +26,6 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 from homeassistant.util import dt as dt_util
 
 from .const import (
-    CONF_CAUSE_ENTITY,
     DEVICE_INITIATED_SOURCES,
     DOMAIN,
     ENTITY_LOCK,
@@ -541,40 +540,16 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         # who opened it.
         attribution = actor if actor == mechanism else f"{actor} with {mechanism}"
         message = f"{node.node_name} {state} by {attribution}"
-        # An entry scoped to no entity is still an entry: a cause that cannot be attached
-        # to an entity is worth more than no cause at all, so one is always written.
-        targets: list[str | None] = [*self._cause_entity_ids(node.node_id)]
-        if not targets:
-            targets = [None]
-        for entity_id in targets:
-            async_log_entry(
-                self.hass,
-                name="HomeKey",
-                message=message,
-                domain=DOMAIN,
-                entity_id=entity_id,
-                context=context,
-            )
-
-    def _cause_entity_ids(self, node_id: str) -> list[str]:
-        """Every lock entity a node's causes should be recorded on.
-
-        The integration's own lock entity is the one it owns. A node that also publishes its
-        own MQTT discovery appears twice in Home Assistant, and a cause written against only
-        one of them is invisible in the other's activity - the activity log belongs to the
-        entity, not to the node. So an entry may name one further lock entity, chosen by the
-        user and empty by default.
-        """
-        entity_ids: list[str] = []
-        own = self._lock_entity_id(node_id)
-        if own:
-            entity_ids.append(own)
-        extra: object = None
-        if self.config_entry is not None:
-            extra = self.config_entry.options.get(CONF_CAUSE_ENTITY)
-        if isinstance(extra, str) and extra and extra not in entity_ids:
-            entity_ids.append(extra)
-        return entity_ids
+        # One entry, on this integration's own lock. An entry scoped to no entity is still
+        # an entry, so a cause that cannot be attached is written anyway rather than lost.
+        async_log_entry(
+            self.hass,
+            name="HomeKey",
+            message=message,
+            domain=DOMAIN,
+            entity_id=self._lock_entity_id(node.node_id),
+            context=context,
+        )
 
     def _lock_entity_id(self, node_id: str) -> str | None:
         """Entity id of a node's lock, or ``None`` when it cannot be resolved.
