@@ -35,8 +35,10 @@ from homeassistant.config_entries import (
 )
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import EntitySelector, EntitySelectorConfig
 
 from .const import (
+    CONF_CAUSE_ENTITY,
     CONF_COMMAND_CONTROL,
     CONF_FINGERPRINT,
     CONF_HOST,
@@ -919,6 +921,7 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                     CONF_COMMAND_CONTROL: user_input.get(
                         CONF_COMMAND_CONTROL, DEFAULT_COMMAND_CONTROL
                     ),
+                    CONF_CAUSE_ENTITY: user_input.get(CONF_CAUSE_ENTITY) or "",
                 }
                 return self.async_create_entry(data=new_options)
 
@@ -942,6 +945,10 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                             DEFAULT_LEGACY_CLIENT_ID_PREFIX,
                         ),
                     ): str,
+                    vol.Optional(
+                        CONF_CAUSE_ENTITY,
+                        default=current_options.get(CONF_CAUSE_ENTITY, ""),
+                    ): EntitySelector(EntitySelectorConfig(domain="lock")),
                 }
             ),
             errors=errors,

@@ -34,7 +34,9 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
+from .backup import BACKUP_STORE_KEY, BackupStore, StoredBackup
 from .const import (
+    DOMAIN,
     ENTITY_SENSOR_BACKUP,
     ENTITY_SENSOR_FIRMWARE,
     ENTITY_SENSOR_HEALTH,
@@ -162,7 +164,13 @@ class HomeKeyHealthSensor(HomeKeyBaseSensor):
 
 
 class HomeKeyBackupSensor(HomeKeyBaseSensor):
-    """Backup outcome from ``B/backup/last`` (metadata only)."""
+    """What the node says about its last backup, and what Home Assistant holds.
+
+    The node's own report is metadata - an outcome and a timestamp - because the device
+    keeps no copy of the backup itself. So the attributes also state how many copies this
+    integration has taken and when the newest one was made, which is the part that still
+    exists after the node does not.
+    """
 
     def __init__(self, coordinator: HomeKeyHouseholdCoordinator, node_id: str) -> None:
         super().__init__(
@@ -176,6 +184,13 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             ),
             options=_BACKUP_OPTIONS,
         )
+
+    def _stored_backups(self) -> list[StoredBackup]:
+        """Copies held for this node, newest last."""
+        store = self.hass.data.get(DOMAIN, {}).get(BACKUP_STORE_KEY)
+        if not isinstance(store, BackupStore):
+            return []
+        return store.for_node(self._node_id)
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
@@ -192,6 +207,14 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             attributes["backup_age_seconds"] = _age_seconds(parsed)
         if node.backup_status is not None:
             attributes["last_event"] = node.backup_status
+        stored = self._stored_backups()
+        attributes["stored_backups"] = len(stored)
+        if stored:
+            latest = stored[-1]
+            attributes["stored_created"] = latest.created
+            attributes["stored_age_seconds"] = _age_seconds(_parse_dt(latest.created))
+            if latest.node_time is not None:
+                attributes["stored_node_time"] = latest.node_time
         return attributes
 
 

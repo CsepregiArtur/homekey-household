@@ -4,7 +4,11 @@ Two things are being established here, and the second is the subtle one:
 
 1. ``B/lock/last`` is parsed strictly, and only a cause that belongs to *this* change is
    used - never the previous one, which would blame whatever happened last for what
-   happened now.
+   happened now. The cause is recorded when the event arrives rather than when a later
+   health snapshot confirms it: the snapshot samples the lock on a cadence, so a change
+   that does not survive until the next sample - the usual case for a tap, which relocks a
+   moment later - was never attributed at all, and the activity log reported that no cause
+   was recorded for a door somebody had just opened.
 2. A change Home Assistant asked for is left alone. Its service-call context is already
    pending on the entity and is consumed by the very write the change causes, which is
    what puts the user's name and "Action used: Lock lock" in the activity log. Overriding
@@ -14,11 +18,14 @@ Two things are being established here, and the second is the subtle one:
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 from homeassistant.const import EVENT_LOGBOOK_ENTRY
+from homeassistant.core import callback
 
 from custom_components.homekey_household.const import (
+    CONF_CAUSE_ENTITY,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
     TOPIC_LOCK_LAST,
@@ -114,9 +121,12 @@ def logbook_entries(hass):
     """Every logbook entry fired while the test runs, with its context."""
     captured: list[dict] = []
 
+    @callback
     def _capture(event) -> None:
         # The context lives on the event rather than in its data, and the context is the
-        # whole point of the exercise, so it is folded in here.
+        # whole point of the exercise, so it is folded in here. Declared as a callback so
+        # it runs on the event loop in order: a plain listener is handed to an executor,
+        # and what it collected may not have arrived by the time a test looks at it.
         captured.append({**event.data, "context": event.context})
 
     hass.bus.async_listen(EVENT_LOGBOOK_ENTRY, _capture)
@@ -217,16 +227,15 @@ class TestAttribution:
     ):
         await register_node(coordinator)
         await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
-        await coordinator.async_handle_message(
-            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekey"))
-        )
 
         seen: list[object] = []
         coordinator.async_add_listener(
             lambda: seen.append(coordinator.pending_context(NID))
         )
+        # The event is what the entity reacts to: it is the update that changes the state
+        # the entity writes, so it is the update that has to carry the cause.
         await coordinator.async_handle_message(
-            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekey"))
         )
 
         # Present while the entities write, so their state change carries it...
@@ -251,16 +260,13 @@ class TestAttribution:
     ):
         await register_node(coordinator)
         await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
-        await coordinator.async_handle_message(
-            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
-        )
 
         captured: list[object] = []
         coordinator.async_add_listener(
             lambda: captured.append(coordinator.pending_context(NID))
         )
         await coordinator.async_handle_message(
-            make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
         )
 
         # The logbook entry and the state change must carry the *same* context, or the
@@ -297,29 +303,28 @@ class TestAttribution:
         assert logbook_entries == []
         assert coordinator.pending_context(NID) is None
 
-    async def test_a_stale_cause_is_not_applied_to_a_different_change(
+    async def test_a_cause_is_never_borrowed_by_a_later_snapshot(
         self, coordinator, logbook_entries
     ):
         await register_node(coordinator)
         await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
-        # A cause from an earlier change that produced the *locked* state...
+        # An event that describes the *locked* state...
         await coordinator.async_handle_message(
             make_message(TOPIC_LOCK_LAST, lock_last(LOCK_LOCKED, "homekit"))
         )
-        # ...while the state moves to unlocked. The cause does not describe this change.
+        # ...while the snapshot reports a move to unlocked, with no event of its own. The
+        # cause for the event describes the event, not this.
         await coordinator.async_handle_message(
             make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
         )
 
-        assert logbook_entries == []
-        assert coordinator.pending_context(NID) is None
+        assert len(logbook_entries) == 1
+        assert "locked" in logbook_entries[0]["message"]
 
     async def test_the_first_reading_is_not_a_change(self, coordinator, logbook_entries):
         await register_node(coordinator)
-        await coordinator.async_handle_message(
-            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
-        )
-        # Nothing to compare against yet: the node may simply have been unlocked all along.
+        # No event, and nothing to compare the reading against yet: the node may simply
+        # have been unlocked all along.
         await coordinator.async_handle_message(
             make_message(TOPIC_HEALTH, health(LOCK_UNLOCKED))
         )
@@ -334,7 +339,9 @@ class TestAttribution:
         )
         await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
 
-        assert logbook_entries == []
+        # The event is announced once; the snapshot that agrees with it adds nothing.
+        assert len(logbook_entries) == 1
+        assert coordinator.pending_context(NID) is None
 
     @pytest.mark.parametrize(
         ("source", "expected"),
@@ -411,7 +418,9 @@ class TestNamingThePerson:
         )
 
         assert len(logbook_entries) == 1
-        assert logbook_entries[0]["message"] == "Gate unlocked by Artur"
+        assert logbook_entries[0]["message"] == (
+            "Gate unlocked by Artur with a HomeKey credential"
+        )
 
     async def test_an_unnamed_tap_names_the_mechanism(
         self, coordinator, logbook_entries
@@ -481,3 +490,107 @@ class TestNamingThePerson:
         )
 
         assert logbook_entries[0]["message"] == "Gate unlocked by HomeKit"
+
+
+class TestChangeTheSnapshotNeverSees:
+    """A change that is over before the next snapshot is taken.
+
+    ``B/health`` reports the lock on a 30-second cadence. A tap opens the door and the lock
+    closes again a moment later, so the sample taken afterwards says "locked" - exactly what
+    the previous sample said. There is no state change for a snapshot-driven attribution to
+    notice, and the activity log said "No cause was recorded" for a door that had just been
+    opened by somebody. The event is the only record of what happened, and it is now enough
+    on its own.
+    """
+
+    async def test_an_event_is_announced_without_waiting_for_a_snapshot(
+        self, coordinator, logbook_entries
+    ):
+        await register_node(coordinator)
+        await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
+
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST,
+                lock_last(LOCK_UNLOCKED, "homekey", timestamp=int(time.time())),
+            )
+        )
+
+        assert len(logbook_entries) == 1
+        assert "unlocked" in logbook_entries[0]["message"]
+
+    async def test_a_brief_unlock_is_recorded_although_the_snapshot_misses_it(
+        self, coordinator, logbook_entries
+    ):
+        await register_node(coordinator)
+        await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
+
+        # Opened and closed again within the same sampling interval.
+        now = int(time.time())
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit", timestamp=now))
+        )
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_LOCKED, "homekit", timestamp=now + 1))
+        )
+        # The snapshot only ever sees the end state, which matches where it started.
+        await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
+
+        assert [entry["message"] for entry in logbook_entries] == [
+            "Gate unlocked by HomeKit",
+            "Gate locked by HomeKit",
+        ]
+
+    async def test_the_state_follows_the_event_until_the_next_snapshot(self, coordinator):
+        await register_node(coordinator)
+        await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
+        )
+
+        # The event is the fresher report of the lock, so the entity follows it at once
+        # instead of waiting up to 30 seconds for the next sample.
+        assert coordinator.get_node(NID).lock_state == LockState.UNLOCKED
+
+        # The snapshot samples the hardware, so once it arrives it takes over again.
+        await coordinator.async_handle_message(make_message(TOPIC_HEALTH, health(LOCK_LOCKED)))
+        assert coordinator.get_node(NID).lock_state == LockState.LOCKED
+
+    async def test_a_retained_event_from_hours_ago_is_history_not_news(
+        self, coordinator, logbook_entries
+    ):
+        await register_node(coordinator)
+        # The retained event is delivered again on every connect. Announcing it as
+        # something that just happened would put a false entry in the activity log.
+        await coordinator.async_handle_message(
+            make_message(
+                TOPIC_LOCK_LAST,
+                lock_last(LOCK_UNLOCKED, "homekey", timestamp=int(time.time()) - 3600),
+            )
+        )
+
+        assert logbook_entries == []
+
+    async def test_the_same_event_arriving_twice_is_announced_once(
+        self, coordinator, logbook_entries
+    ):
+        await register_node(coordinator)
+        payload = lock_last(LOCK_UNLOCKED, "homekey", timestamp=int(time.time()))
+        await coordinator.async_handle_message(make_message(TOPIC_LOCK_LAST, payload))
+        await coordinator.async_handle_message(make_message(TOPIC_LOCK_LAST, payload))
+
+        assert len(logbook_entries) == 1
+
+    async def test_a_second_lock_entity_can_be_told_the_cause_too(
+        self, hass, logbook_entries
+    ):
+        """A node that also publishes its own MQTT discovery has two lock entities."""
+        entry = FakeConfigEntry(options={CONF_CAUSE_ENTITY: "lock.hk_lock"})
+        coordinator = HomeKeyHouseholdCoordinator(hass, entry, household_id=HID)
+        await register_node(coordinator)
+
+        await coordinator.async_handle_message(
+            make_message(TOPIC_LOCK_LAST, lock_last(LOCK_UNLOCKED, "homekit"))
+        )
+
+        assert [item["entity_id"] for item in logbook_entries] == ["lock.hk_lock"]

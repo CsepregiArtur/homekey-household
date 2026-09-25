@@ -1,0 +1,17 @@
+create_backup:
+  name: Create a node backup
+  description: >-
+    Ask the node for an encrypted backup and keep it in Home Assistant. The node keeps no
+    copy of its own - only the time and hash of the last one - so this is what makes a
+    backup exist somewhere that survives the node. It runs on a schedule as well; this
+    calls it now.
+  fields:
+    config_entry_id:
+      name: Node
+      description: >-
+        Which node to back up, when several are reachable. Leave empty to back up every
+        node whose address, certificate fingerprint and Web UI credentials are configured.
+      required: false
+      selector:
+        config_entry:
+          integration: homekey_household

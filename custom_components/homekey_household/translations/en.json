@@ -103,10 +103,12 @@
           "recovery_secret": "Recovery secret (leave blank to keep current key)",
           "salt": "KDF salt (optional)",
           "command_control": "Enable authenticated lock control",
-          "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)"
+          "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)",
+          "cause_entity": "Also record lock causes on another lock entity"
         },
         "data_description": {
-          "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic."
+          "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic.",
+          "cause_entity": "Optional. A node that also publishes its own MQTT discovery appears twice in Home Assistant, and each lock entity keeps its own activity log. Set this to the other lock to have the cause recorded there as well."
         }
       }
     },

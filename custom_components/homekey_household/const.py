@@ -37,6 +37,10 @@ CONF_SALT: Final = "salt"
 CONF_COMMAND_CONTROL: Final = "command_control"
 # Legacy MQTT client-id prefix, used only for the *shared LWT availability topic*.
 CONF_LEGACY_CLIENT_ID_PREFIX: Final = "legacy_client_id_prefix"
+# Another lock entity to record causes on, for a node that is also exposed by the
+# firmware's own MQTT discovery. Empty by default: the integration's own lock entity is the
+# one it owns, and writing into a second entity's activity log is opt-in.
+CONF_CAUSE_ENTITY: Final = "cause_entity"
 
 DEFAULT_LEGACY_CLIENT_ID_PREFIX: Final = "ESP_"
 DEFAULT_COMMAND_CONTROL: Final = True
@@ -151,6 +155,20 @@ TOPIC_LAST_AUTH: Final = "last_auth"
 # state it explains, and retained, so a client can say *what* opened the door rather than
 # only that it opened.
 TOPIC_LOCK_LAST: Final = "lock/last"
+
+# ---------------------------------------------------------------------------
+# Backups
+#
+# A backup exists only as the reply to POST /backup/create on the node's own API. The
+# device keeps the time and hash of the last one and nothing else, and the household MQTT
+# namespace has no topic that carries one - backup/request and backup/data appear in the
+# documented topic list but nothing implements them. So keeping a backup means fetching it
+# and holding it somewhere that outlives the node.
+# ---------------------------------------------------------------------------
+BACKUP_KEEP: Final = 7
+BACKUP_INTERVAL_SECONDS: Final = 24 * 60 * 60
+BACKUP_STORE_VERSION: Final = 1
+SERVICE_CREATE_BACKUP: Final = "create_backup"
 
 # Command subtopics (HMAC-authenticated, authoritative for HA V2)
 TOPIC_CMD_LOCK: Final = "command/lock"
@@ -443,6 +461,12 @@ class LockSource(StrEnum):
 DEVICE_INITIATED_SOURCES: Final[frozenset[str]] = frozenset(
     {LockSource.HOMEKIT, LockSource.HOMEKEY, LockSource.DEVICE}
 )
+
+# How long after it happened a lock event is still worth announcing. The retained event is
+# re-delivered on every connect - including the first connect after a Home Assistant
+# restart - and an event older than this window is history rather than news: the activity
+# log is a record of what happened, not of what was true when the integration started.
+LOCK_EVENT_MAX_AGE_SECONDS: Final = 300
 
 # How each source reads in the logbook.
 LOCK_SOURCE_LABELS: Final[dict[str, str]] = {

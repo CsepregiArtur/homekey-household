@@ -489,6 +489,28 @@ class DirectClient:
             raise DirectProtocolError(f"Unsupported lock action: {action!r}")
         return await self._request("POST", "/api/ha/lock", json={"action": action})
 
+    async def async_create_backup(self) -> str:
+        """Ask the node for an encrypted backup and return it as hex.
+
+        The backup is produced on demand and handed over in the reply; the node keeps only
+        the time and hash of the last one. Whoever asked is therefore the only holder of it,
+        which is why the integration asks on a schedule instead of trusting somebody to
+        remember to open the Web UI and click Download.
+        """
+        result = await self._request("POST", "/backup/create")
+        blob = result.get("backup")
+        if not isinstance(blob, str) or not blob:
+            raise DirectProtocolError("The node did not return a backup")
+        return blob
+
+    async def async_get_backup_info(self) -> dict[str, Any]:
+        """The node's summary of its last backup: outcome, time and hash.
+
+        Metadata only - it never carries the backup itself, which is the point of storing
+        one somewhere else.
+        """
+        return await self._request("GET", "/backup")
+
 
 @dataclass(frozen=True)
 class DirectProbe:

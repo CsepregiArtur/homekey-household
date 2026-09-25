@@ -48,6 +48,7 @@ from .const import (
     KEY_SECURITY_WARNINGS,
     KEY_TIMESTAMP,
     KEY_UPTIME,
+    LOCK_STATE_MAP,
     AuthResult,
     BackupOutcome,
     LockSource,
@@ -310,8 +311,6 @@ class NodeHealth:
     @property
     def lock_current_state(self) -> str | None:
         """Lock state enum for ``lock_current`` (``None`` when absent)."""
-        from .const import LOCK_STATE_MAP
-
         if self.lock_current is None:
             return None
         return LOCK_STATE_MAP.get(self.lock_current, LockState.UNKNOWN)
@@ -443,14 +442,38 @@ class Node:
     # The most recent change the node reported, including what asked for it. Kept so a
     # lock state change can be attributed to a cause rather than to nothing.
     lock_change: LockChange | None = None
+    # True while ``lock_change`` is newer than the health snapshot. ``B/lock/last`` is
+    # published the moment the lock changes; ``B/health`` samples it on a cadence, so
+    # between the two the event is the fresher word on the lock.
+    lock_change_is_fresh: bool = False
+    # ``(timestamp, current, source)`` of the change whose cause has already been recorded,
+    # so a retained replay of the same event is not announced as news a second time.
+    attributed_lock_change: tuple[str | None, int, str] | None = None
 
     def __post_init__(self) -> None:
         if not self.node_name:
             self.node_name = self.node_id
 
     @property
+    def lock_change_key(self) -> tuple[str | None, int, str] | None:
+        """Identity of the most recent lock event, for de-duplication."""
+        if self.lock_change is None:
+            return None
+        change = self.lock_change
+        return (change.timestamp, change.current, change.source)
+
+    @property
     def lock_state(self) -> str:
-        """Lock state derived from the health snapshot (``lock_current``)."""
+        """The lock's state, from the freshest report of it.
+
+        Two documents describe the lock. ``B/lock/last`` is published the moment it
+        changes; ``B/health`` is a snapshot taken on a cadence. Where they disagree the
+        event wins, but only until the next snapshot arrives: a snapshot samples the
+        hardware, so it is the one that knows about a jam, while the event only knows what
+        was asked for.
+        """
+        if self.lock_change_is_fresh and self.lock_change is not None:
+            return LOCK_STATE_MAP.get(self.lock_change.current, LockState.UNKNOWN)
         if self.health is None:
             return LockState.UNKNOWN
         return self.health.lock_current_state or LockState.UNKNOWN

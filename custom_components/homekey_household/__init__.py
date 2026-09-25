@@ -39,6 +39,7 @@ from homeassistant.exceptions import (
     ConfigEntryNotReady,
 )
 
+from .backup import async_setup_backups
 from .const import (
     CONF_COMMAND_CONTROL,
     CONF_FINGERPRINT,
@@ -109,8 +110,14 @@ class HomeKeyRuntime:
 
 
 async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
-    """Set up the integration from configuration.yaml (no services are defined)."""
+    """Set up the integration: the backup schedule and its service.
+
+    Done here rather than per entry, because a backup belongs to a household and its store
+    outlives any single entry: a node being re-added, or its entry reloaded, must not lose
+    the copies already kept.
+    """
     hass.data.setdefault(DOMAIN, {})
+    await async_setup_backups(hass)
     return True
 
 

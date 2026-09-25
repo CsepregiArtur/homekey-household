@@ -17,18 +17,21 @@ import json
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import Context, HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
+from homeassistant.util import dt as dt_util
 
 from .const import (
+    CONF_CAUSE_ENTITY,
     DEVICE_INITIATED_SOURCES,
     DOMAIN,
     ENTITY_LOCK,
     JSON_SUBTOPICS,
+    LOCK_EVENT_MAX_AGE_SECONDS,
     LOCK_SOURCE_LABELS,
     LOCK_STATE_MAP,
     TOPIC_BACKUP_LAST,
@@ -59,6 +62,35 @@ _LOGGER = logging.getLogger(__name__)
 
 # Debounce for auto-discovery reloads (seconds).
 _RELOAD_DEBOUNCE_SECONDS = 3.0
+
+# The unix epoch at 1e9 seconds. Below it a stamp is far too small to be a wall-clock time,
+# which is how the firmware's seconds-since-boot fallback is told apart from a real date.
+_WALL_CLOCK_FLOOR = datetime(2001, 9, 9, tzinfo=UTC)
+
+
+def _is_recent(timestamp: str | None, *, now: datetime | None = None) -> bool:
+    """Whether a node's event stamp is close enough to now to be announced.
+
+    The node's retained ``B/lock/last`` is delivered again on every connect, including the
+    first one after Home Assistant restarts. Attaching a cause to a change that happened
+    yesterday would put a line in the activity log describing something that did not just
+    happen, so an old event is left as history: it is still the node's account of its last
+    change, and it is still not news.
+    """
+    if timestamp is None:
+        # Nothing to judge by. De-duplication already stops the event being repeated.
+        return True
+    parsed = dt_util.parse_datetime(timestamp)
+    if parsed is None:
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    if parsed < _WALL_CLOCK_FLOOR:
+        # Too small to be a wall-clock time. The firmware falls back to seconds since boot
+        # when it has not yet learned the time, and such a stamp says nothing about how
+        # long ago the event happened - so it is taken at face value rather than discarded.
+        return True
+    return (now or dt_util.utcnow()) - parsed <= timedelta(seconds=LOCK_EVENT_MAX_AGE_SECONDS)
 
 # How long to wait for retained household messages to register nodes before the
 # entity platforms are set up. Retained messages are delivered asynchronously
@@ -220,6 +252,11 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             previous_current = node.health.lock_current if node.health else None
             health = NodeHealth.from_dict(payload, self.household_id, node_id)
             node.health = health
+            # The snapshot is newer than the event that preceded it, so from here on the
+            # entity's state comes from the snapshot again. It samples the hardware, and
+            # is therefore the one that knows about an outcome the event could not - a jam,
+            # for instance, which the event recorded as "locking".
+            node.lock_change_is_fresh = False
             # Attribution is a *description* of this update, not part of it. If it fails,
             # the state still has to be published: dropping a real reading because a
             # logbook entry could not be written would be a far worse failure than a
@@ -234,9 +271,18 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
                 )
             updated = True
         elif subtopic == TOPIC_LOCK_LAST and node_id:
-            self._ensure_node(node_id).lock_change = LockChange.from_dict(
-                payload, self.household_id, node_id
-            )
+            node = self._ensure_node(node_id)
+            change = LockChange.from_dict(payload, self.household_id, node_id)
+            node.lock_change = change
+            node.lock_change_is_fresh = True
+            try:
+                self._attribute_lock_event(node, change)
+            except Exception:  # noqa: BLE001 - a description must not break ingestion
+                _LOGGER.exception(
+                    "Could not attribute a lock event for %s/%s",
+                    self.household_id,
+                    node_id,
+                )
             updated = True
         elif subtopic == TOPIC_SECURITY and node_id:
             self._handle_security(node_id, message.payload)
@@ -403,6 +449,10 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             # No cause on record for *this* change. Using the previous one would blame
             # whatever happened last for what happened now.
             return
+        if node.attributed_lock_change is not None and node.attributed_lock_change == node.lock_change_key:
+            # This cause was already recorded when the node reported the event itself. The
+            # snapshot has merely caught up with it.
+            return
         if change.source not in DEVICE_INITIATED_SOURCES:
             # Home Assistant already knows who asked, and overriding that would replace a
             # real person with a vaguer description.
@@ -412,6 +462,37 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         self._pending_contexts[node.node_id] = context
         self._async_log_lock_cause(
             node, current, change.source, change.timestamp, context
+        )
+
+    def _attribute_lock_event(self, node: Node, change: LockChange) -> None:
+        """Give a lock event a cause, at the moment the node reports it.
+
+        ``B/lock/last`` is published when the lock changes; ``B/health`` samples the lock on
+        a cadence. Attributing from the snapshot alone therefore misses every change that
+        does not survive until the next sample - a door unlocked and relocked within a
+        second, which is what a tap does - and those changes then show up in the activity
+        log with no cause at all. The event carries the source and the time, so it is the
+        one to attribute from; the snapshot stays as the fallback for a node that does not
+        publish it.
+        """
+        if change.source not in DEVICE_INITIATED_SOURCES:
+            # Home Assistant asked for this, or is about to learn who did.
+            return
+        key = node.lock_change_key
+        if key is not None and node.attributed_lock_change == key:
+            # Retained topics are re-delivered on every connect. The same event must not be
+            # announced as news twice.
+            return
+        if not _is_recent(change.timestamp):
+            return
+
+        # Fired with the same context the entities are about to write with, so the state
+        # change this event causes carries its cause rather than nothing.
+        context = Context()
+        self._pending_contexts[node.node_id] = context
+        node.attributed_lock_change = key
+        self._async_log_lock_cause(
+            node, change.current, change.source, change.timestamp, context
         )
 
     @callback
@@ -453,17 +534,47 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         from homeassistant.components.logbook import async_log_entry
 
         state = LOCK_STATE_MAP.get(current, LockState.UNKNOWN)
-        async_log_entry(
-            self.hass,
-            name="HomeKey",
-            message=(
-                f"{node.node_name} {state} by "
-                f"{self._actor_for(node, source, change_timestamp)}"
-            ),
-            domain=DOMAIN,
-            entity_id=self._lock_entity_id(node.node_id),
-            context=context,
-        )
+        actor = self._actor_for(node, source, change_timestamp)
+        mechanism = LOCK_SOURCE_LABELS.get(source, source)
+        # When the actor is a person, say what they used as well: "Artur" alone does not
+        # answer how the door was opened, and "a HomeKey credential" alone does not answer
+        # who opened it.
+        attribution = actor if actor == mechanism else f"{actor} with {mechanism}"
+        message = f"{node.node_name} {state} by {attribution}"
+        # An entry scoped to no entity is still an entry: a cause that cannot be attached
+        # to an entity is worth more than no cause at all, so one is always written.
+        targets: list[str | None] = [*self._cause_entity_ids(node.node_id)]
+        if not targets:
+            targets = [None]
+        for entity_id in targets:
+            async_log_entry(
+                self.hass,
+                name="HomeKey",
+                message=message,
+                domain=DOMAIN,
+                entity_id=entity_id,
+                context=context,
+            )
+
+    def _cause_entity_ids(self, node_id: str) -> list[str]:
+        """Every lock entity a node's causes should be recorded on.
+
+        The integration's own lock entity is the one it owns. A node that also publishes its
+        own MQTT discovery appears twice in Home Assistant, and a cause written against only
+        one of them is invisible in the other's activity - the activity log belongs to the
+        entity, not to the node. So an entry may name one further lock entity, chosen by the
+        user and empty by default.
+        """
+        entity_ids: list[str] = []
+        own = self._lock_entity_id(node_id)
+        if own:
+            entity_ids.append(own)
+        extra: object = None
+        if self.config_entry is not None:
+            extra = self.config_entry.options.get(CONF_CAUSE_ENTITY)
+        if isinstance(extra, str) and extra and extra not in entity_ids:
+            entity_ids.append(extra)
+        return entity_ids
 
     def _lock_entity_id(self, node_id: str) -> str | None:
         """Entity id of a node's lock, or ``None`` when it cannot be resolved.
