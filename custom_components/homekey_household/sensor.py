@@ -213,6 +213,9 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             latest = stored[-1]
             attributes["stored_created"] = latest.created
             attributes["stored_age_seconds"] = _age_seconds(_parse_dt(latest.created))
+            # Which kind of backup the newest copy is decides what it can do: with the
+            # node's keys inside, a replacement node needs no tag enrolled again.
+            attributes["stored_includes_credentials"] = latest.includes_credentials
             if latest.node_time is not None:
                 attributes["stored_node_time"] = latest.node_time
         return attributes

@@ -164,6 +164,13 @@ TOPIC_LOCK_LAST: Final = "lock/last"
 BACKUP_KEEP: Final = 7
 BACKUP_INTERVAL_SECONDS: Final = 24 * 60 * 60
 BACKUP_STORE_VERSION: Final = 1
+
+# Whether a backup should also carry the node's credential store and HomeKit pairing
+# state. Off by default: such a file is the keys to the door, and it should be a
+# deliberate thing to hold rather than what every scheduled copy turns into.
+CONF_BACKUP_INCLUDE_CREDENTIALS: Final = "backup_include_credentials"
+DEFAULT_BACKUP_INCLUDE_CREDENTIALS: Final = False
+
 SERVICE_CREATE_BACKUP: Final = "create_backup"
 SERVICE_RESTORE_BACKUP: Final = "restore_backup"
 # Translation key of the per-node "back up now" button.

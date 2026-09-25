@@ -11,6 +11,15 @@ create_backup:
       description: >-
         Which node to back up, when several are reachable. Leave empty to back up every
         node whose address, certificate fingerprint and Web UI credentials are configured.
+    include_credentials:
+      name: Include the node's keys
+      description: >-
+        Also seal this node's credential store and its HomeKit pairing state into the
+        backup. That is what lets a replacement node come back without every tag being
+        enrolled again, and it is also what makes the file the keys to the door: keep it
+        where a key would be kept. Off unless asked for, and off by default for the
+        schedule too unless the entry is configured to include them. The node reports back
+        what a copy actually holds, which is recorded with it.
       required: false
       selector:
         config_entry:

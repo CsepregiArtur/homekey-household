@@ -38,6 +38,7 @@ from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from .const import (
+    CONF_BACKUP_INCLUDE_CREDENTIALS,
     CONF_COMMAND_CONTROL,
     CONF_FINGERPRINT,
     CONF_HOST,
@@ -58,6 +59,7 @@ from .const import (
     CONF_SALT,
     CONF_TRANSPORT,
     CONF_USERNAME,
+    DEFAULT_BACKUP_INCLUDE_CREDENTIALS,
     DEFAULT_COMMAND_CONTROL,
     DEFAULT_HTTPS_PORT,
     DEFAULT_LEGACY_CLIENT_ID_PREFIX,
@@ -933,6 +935,14 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                     CONF_PASSWORD: user_input.get(CONF_PASSWORD)
                     or current_password,
                     CONF_FINGERPRINT: (user_input.get(CONF_FINGERPRINT) or "").strip(),
+                    # Always a real boolean: an option that can only be set and never
+                    # cleared is worse than one that starts off.
+                    CONF_BACKUP_INCLUDE_CREDENTIALS: bool(
+                        user_input.get(
+                            CONF_BACKUP_INCLUDE_CREDENTIALS,
+                            DEFAULT_BACKUP_INCLUDE_CREDENTIALS,
+                        )
+                    ),
                 }
                 return self.async_create_entry(data=new_options)
 
@@ -983,6 +993,16 @@ class HomeKeyHouseholdOptionsFlow(OptionsFlow):
                             CONF_FINGERPRINT, entry.data.get(CONF_FINGERPRINT, "")
                         ),
                     ): str,
+                    # Off by default: a backup that carries the node's keys *is* the keys
+                    # to the door, so it is something asked for once and then remembered
+                    # rather than what every scheduled copy quietly turns into.
+                    vol.Optional(
+                        CONF_BACKUP_INCLUDE_CREDENTIALS,
+                        default=current_options.get(
+                            CONF_BACKUP_INCLUDE_CREDENTIALS,
+                            DEFAULT_BACKUP_INCLUDE_CREDENTIALS,
+                        ),
+                    ): bool,
                 }
             ),
             errors=errors,

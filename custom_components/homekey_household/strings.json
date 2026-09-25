@@ -108,13 +108,15 @@
           "port": "Node HTTPS port",
           "username": "Web UI username",
           "password": "Web UI password (leave blank to keep the current one)",
-          "fingerprint": "Certificate fingerprint (SHA-256, colon separated)"
+          "fingerprint": "Certificate fingerprint (SHA-256, colon separated)",
+          "backup_include_credentials": "Include the node's keys in each backup (it becomes the keys to the door)"
         },
         "data_description": {
           "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic.",
           "salt": "The node holds the recovery secret and this salt as bytes and reports both as hex. Both are needed to derive the command key: a secret without the matching salt derives a key the node rejects with bad_mac, and the rejection is not visible from here. The node prints its own salt as recovery_salt on its Household page.",
           "host": "Optional. A backup or a restore travels over the node's own HTTPS API, not over MQTT, so it needs the node's address, its certificate fingerprint and its Web UI credentials. Leave empty and backup or restore will say they cannot reach the node.",
-          "fingerprint": "The SHA-256 fingerprint the node reports on its own API page. It is what pins the connection: without it, the integration will not send a credential to whatever answers at that address."
+          "fingerprint": "The SHA-256 fingerprint the node reports on its own API page. It is what pins the connection: without it, the integration will not send a credential to whatever answers at that address.",
+          "backup_include_credentials": "The backup then also carries the reader credential store - its identity and the enrolled issuers' endpoint keys - and the HomeKit pairing state. That is what lets a replacement node come back without every tag being enrolled again, and it is also what makes the file the keys to the door: keep it where you would keep a key, not in a chat message. Off, each backup is configuration only, and restoring one means the enrolled devices have to be provisioned again. The node reports which kind a copy actually is, and the backup sensor shows that for the newest stored one."
         }
       }
     },

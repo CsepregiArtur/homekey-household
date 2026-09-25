@@ -489,19 +489,33 @@ class DirectClient:
             raise DirectProtocolError(f"Unsupported lock action: {action!r}")
         return await self._request("POST", "/api/ha/lock", json={"action": action})
 
-    async def async_create_backup(self) -> str:
-        """Ask the node for an encrypted backup and return it as hex.
+    async def async_create_backup(self, include_credentials: bool = False) -> tuple[str, bool]:
+        """Ask the node for an encrypted backup.
 
         The backup is produced on demand and handed over in the reply; the node keeps only
         the time and hash of the last one. Whoever asked is therefore the only holder of it,
         which is why the integration asks on a schedule instead of trusting somebody to
         remember to open the Web UI and click Download.
+
+        ``include_credentials`` asks for the node's credential store and its HomeKit
+        pairing state to be sealed inside the file too, which is what lets a replacement
+        node come back without every tag being enrolled again. The returned boolean is what
+        the *node* reports it put in, not what was asked for - the difference between a
+        configuration-only file and one that is also the keys is exactly what matters when
+        one of them is needed months later.
+
+        Nothing is sent in the body unless credentials are asked for, so this keeps working
+        against a node whose firmware predates the choice: it was the older firmware that
+        could not cope with a body it did not expect.
         """
-        result = await self._request("POST", "/backup/create")
+        kwargs: dict[str, Any] = (
+            {"json": {"include_credentials": True}} if include_credentials else {}
+        )
+        result = await self._request("POST", "/backup/create", **kwargs)
         blob = result.get("backup")
         if not isinstance(blob, str) or not blob:
             raise DirectProtocolError("The node did not return a backup")
-        return blob
+        return blob, result.get("includes_credentials") is True
 
     async def async_restore_backup(self, recovery_secret: str, backup: str) -> dict[str, Any]:
         """Hand a backup and the recovery secret to a node, and let it restore itself.

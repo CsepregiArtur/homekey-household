@@ -30,11 +30,13 @@ from .const import (
     BACKUP_INTERVAL_SECONDS,
     BACKUP_KEEP,
     BACKUP_STORE_VERSION,
+    CONF_BACKUP_INCLUDE_CREDENTIALS,
     CONF_FINGERPRINT,
     CONF_HOST,
     CONF_PASSWORD,
     CONF_PORT,
     CONF_USERNAME,
+    DEFAULT_BACKUP_INCLUDE_CREDENTIALS,
     DEFAULT_HTTPS_PORT,
     DOMAIN,
     SERVICE_CREATE_BACKUP,
@@ -68,6 +70,16 @@ class StoredBackup:
     """The node's own stamp for the backup it handed over, when it reported one."""
     blob: str
     """The encrypted backup, hex, byte for byte as the node returned it."""
+    includes_credentials: bool = False
+    """Whether the node sealed its own keys and pairing state into this copy.
+
+    Recorded from the node's answer rather than from what was requested. This is the
+    field that decides what the copy is good for: with it, a replacement node comes back
+    without a single tag being enrolled again; without it, the file restores membership
+    and configuration and the enrolled devices have to be provisioned anew. Records
+    written before the choice existed have no such field, which is correct - they were
+    taken without it.
+    """
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -76,6 +88,7 @@ class StoredBackup:
             "created": self.created,
             "node_time": self.node_time,
             "blob": self.blob,
+            "includes_credentials": self.includes_credentials,
         }
 
     @classmethod
@@ -98,6 +111,7 @@ class StoredBackup:
             created=str(raw.get("created") or ""),
             node_time=node_time if isinstance(node_time, int) else None,
             blob=blob,
+            includes_credentials=raw.get("includes_credentials") is True,
         )
 
 
@@ -215,6 +229,7 @@ async def async_fetch_backup(
     *,
     node_id: str | None = None,
     running_client: DirectClient | None = None,
+    include_credentials: bool = False,
 ) -> StoredBackup:
     """Ask a node for a backup and return it.
 
@@ -222,6 +237,9 @@ async def async_fetch_backup(
     been re-verified at startup. Without one, the connection is established here and the
     fingerprint is checked against the pinned value before a credential is sent - the same
     order of operations the config flow and entry setup use.
+
+    ``include_credentials`` asks the node to seal its credential store and pairing state
+    into this copy as well.
     """
     if running_client is not None:
         client = running_client
@@ -238,13 +256,14 @@ async def async_fetch_backup(
         client = probe.client
         node_id = probe.node_id
 
-    blob = await client.async_create_backup()
+    blob, node_includes_credentials = await client.async_create_backup(include_credentials)
     return StoredBackup(
         node_id=node_id or "",
         household_id=str(entry_data.get("household_id") or ""),
         created=datetime.now(UTC).isoformat(),
         node_time=await _async_node_backup_time(client),
         blob=blob,
+        includes_credentials=node_includes_credentials,
     )
 
 
@@ -279,7 +298,19 @@ async def async_setup_backups(hass: HomeAssistant) -> None:
                 "Configure on the entry."
             )
         for entry_id in entry_ids:
-            await async_back_up_entry(hass, store, entry_id, explicit=True)
+            await async_back_up_entry(
+                hass,
+                store,
+                entry_id,
+                explicit=True,
+                # A call may ask for one file of either kind; without that, the entry's
+                # remembered choice applies.
+                include_credentials=(
+                    None
+                    if call.data.get(CONF_BACKUP_INCLUDE_CREDENTIALS) is None
+                    else bool(call.data.get(CONF_BACKUP_INCLUDE_CREDENTIALS))
+                ),
+            )
 
     async def _restore_now(call: Any) -> None:
         entry_ids = _target_entry_ids(hass, call.data)
@@ -336,8 +367,15 @@ async def async_back_up_entry(
     entry_id: str,
     *,
     explicit: bool = False,
+    include_credentials: bool | None = None,
 ) -> None:
     """Take one backup for one entry.
+
+    ``include_credentials`` decides whether the file also carries the node's credential
+    store and its HomeKit pairing state, which is what makes a replacement node possible
+    without re-enrolling every tag. ``None`` means "however this entry is configured", so
+    a choice made once keeps applying to the schedule and to the button rather than having
+    to be repeated at every call.
 
     The scheduled run logs and moves on: a job that raises is a job that stops being
     useful, and a node that is briefly unreachable is not worth a failure. A run somebody
@@ -354,6 +392,12 @@ async def async_back_up_entry(
             )
         return
     entry_data = entry_backup_settings(runtime)
+    if include_credentials is None:
+        include_credentials = bool(
+            entry_data.get(
+                CONF_BACKUP_INCLUDE_CREDENTIALS, DEFAULT_BACKUP_INCLUDE_CREDENTIALS
+            )
+        )
     if not backup_client_for(entry_data):
         # A backup travels over the node's own API. Saying that is more useful than the
         # failure a missing address would produce further down.
@@ -375,6 +419,7 @@ async def async_back_up_entry(
             entry_data,
             node_id=getattr(transport, "node_id", None),
             running_client=running_client,
+            include_credentials=include_credentials,
         )
     except DirectTransportError as err:
         _LOGGER.warning("Could not back up the node for entry %s: %s", entry_id, err)
@@ -386,10 +431,11 @@ async def async_back_up_entry(
 
     await store.async_add(backup)
     _LOGGER.info(
-        "Stored a backup of %s (%d bytes, %d kept)",
+        "Stored a backup of %s (%d bytes, %d kept, credentials %s)",
         backup.node_id or backup.household_id,
         len(backup.blob),
         len(store.for_node(backup.node_id)),
+        "included" if backup.includes_credentials else "not included",
     )
 
 

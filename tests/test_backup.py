@@ -21,6 +21,7 @@ from custom_components.homekey_household.backup import (
     entry_backup_settings,
 )
 from custom_components.homekey_household.const import (
+    CONF_BACKUP_INCLUDE_CREDENTIALS,
     CONF_FINGERPRINT,
     CONF_HOST,
     CONF_PASSWORD,
@@ -86,20 +87,31 @@ class FakePoller(FakeDirectPoller):
 class FakeClient:
     """Records what the integration asked the node to do."""
 
-    def __init__(self, *, backup: str = "ab" * 8, restore_error: Exception | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        backup: str = "ab" * 8,
+        restore_error: Exception | None = None,
+        puts_credentials: bool = True,
+    ) -> None:
         self.backup = backup
         self.restore_error = restore_error
+        self.puts_credentials = puts_credentials
         self.restores: list[tuple[str, str]] = []
         self.backups = 0
+        self.backup_requests: list[bool] = []
         self.identity_reads = 0
 
     async def async_get_info(self) -> dict:
         self.identity_reads += 1
         return {"household_id": HID, "node_id": NID}
 
-    async def async_create_backup(self) -> str:
+    async def async_create_backup(self, include_credentials: bool = False) -> tuple[str, bool]:
         self.backups += 1
-        return self.backup
+        self.backup_requests.append(include_credentials)
+        # A node seals its keys in only when it was asked to, and reports either way. This
+        # is the answer the integration has to record, not the request.
+        return self.backup, include_credentials and self.puts_credentials
 
     async def async_get_backup_info(self) -> dict:
         return {"last_backup_time": 1790370000}
@@ -139,6 +151,31 @@ class TestStoredBackup:
         )
         assert record is not None
         assert record.node_time is None
+
+    def test_whether_the_keys_are_inside_survives_a_round_trip(self):
+        record = StoredBackup(
+            node_id=NID,
+            household_id=HID,
+            created="2026-09-26T00:00:00+00:00",
+            node_time=None,
+            blob="cd" * 4,
+            includes_credentials=True,
+        )
+
+        assert StoredBackup.from_dict(record.as_dict()) == record
+
+    def test_a_record_from_before_the_choice_is_configuration_only(self):
+        """Records written before this existed really were taken without the keys.
+
+        So the missing field is not a gap to fill in with a guess, and a value that is not
+        a boolean is not consent either.
+        """
+        record = StoredBackup.from_dict(
+            {"node_id": NID, "blob": "cd" * 4, "includes_credentials": "yes"}
+        )
+
+        assert record is not None
+        assert record.includes_credentials is False
 
 
 class TestBackupStore:
@@ -292,6 +329,54 @@ class TestBackUpAndRestore:
         assert store.latest(NID).blob == client.backup
         # The node's own stamp for it is carried along, so the copy can be dated.
         assert store.latest(NID).node_time == 1790370000
+
+    async def test_a_backup_carries_no_keys_unless_asked(self, hass):
+        """The default is configuration only: a copy of the keys is a decision."""
+        client = FakeClient()
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(
+            entry_with_api_access(), FakePoller(client)
+        )
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        await async_back_up_entry(hass, store, ENTRY_ID)
+
+        assert client.backup_requests == [False]
+        assert store.latest(NID).includes_credentials is False
+
+    async def test_the_entry_option_asks_the_node_for_its_keys(self, hass):
+        """Chosen once, it applies to the schedule and to the button alike."""
+        client = FakeClient()
+        entry = FakeConfigEntry(
+            entry_id=ENTRY_ID,
+            data={**API_ACCESS, "household_id": HID},
+            options={CONF_BACKUP_INCLUDE_CREDENTIALS: True},
+        )
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(entry, FakePoller(client))
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        await async_back_up_entry(hass, store, ENTRY_ID)
+
+        assert client.backup_requests == [True]
+        assert store.latest(NID).includes_credentials is True
+
+    async def test_what_is_recorded_is_what_the_node_answered(self, hass):
+        """A node that cannot do it answers honestly, and that is what gets stored."""
+        client = FakeClient(puts_credentials=False)
+        entry = FakeConfigEntry(
+            entry_id=ENTRY_ID,
+            data={**API_ACCESS, "household_id": HID},
+            options={CONF_BACKUP_INCLUDE_CREDENTIALS: True},
+        )
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(entry, FakePoller(client))
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        await async_back_up_entry(hass, store, ENTRY_ID)
+
+        assert client.backup_requests == [True]
+        assert store.latest(NID).includes_credentials is False
 
     async def test_a_press_that_cannot_reach_the_node_says_so(self, hass):
         entry = FakeConfigEntry(entry_id=ENTRY_ID, data={"household_id": HID})
