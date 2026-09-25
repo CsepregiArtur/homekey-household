@@ -297,6 +297,12 @@ async def async_setup_backups(hass: HomeAssistant) -> None:
                 recovery_secret=str(call.data.get("recovery_secret") or ""),
                 backup_hex=call.data.get("backup"),
             )
+            # Set the entry up again from what the node now reports about itself: a restore
+            # can hand it a household or a node id it did not have, and entities describing
+            # the old identity would otherwise linger. Done here rather than inside the
+            # restore itself because a service only ever runs in a live Home Assistant.
+            if hass.config_entries.async_get_entry(entry_id) is not None:
+                await hass.config_entries.async_reload(entry_id)
 
     hass.services.async_register(DOMAIN, SERVICE_CREATE_BACKUP, _back_up_now)
     hass.services.async_register(DOMAIN, SERVICE_RESTORE_BACKUP, _restore_now)
@@ -435,7 +441,7 @@ async def async_restore_entry(
     transport = getattr(runtime, "transport", None)
     running_client = transport.client if isinstance(transport, DirectPoller) else None
     try:
-        await _async_restore_on_node(
+        client = await _async_restore_on_node(
             hass, entry_data, recovery_secret=recovery_secret, blob=blob, client=running_client
         )
     except DirectTransportError as err:
@@ -450,6 +456,22 @@ async def async_restore_entry(
         len(blob),
     )
 
+    # A restore is the one thing that can change who the node says it is: it may have just
+    # taken on a household, or a different node id, from the backup. Re-read that, and set
+    # the entry up again from it - entities describing the identity the node no longer has
+    # would otherwise linger until something else restarted them.
+    try:
+        info = await client.async_get_info()
+        _LOGGER.info(
+            "After the restore the node reports household %s, node %s",
+            info.get("household_id"),
+            info.get("node_id"),
+        )
+    except DirectTransportError as err:
+        _LOGGER.warning(
+            "Restored the node, but could not read back its identity: %s", err
+        )
+
 
 async def _async_restore_on_node(
     hass: HomeAssistant,
@@ -458,7 +480,7 @@ async def _async_restore_on_node(
     recovery_secret: str,
     blob: str,
     client: DirectClient | None = None,
-) -> None:
+) -> DirectClient:
     """Send the restore to the node, connecting first when no client is running."""
     if client is None:
         probe = await async_connect_node(
@@ -472,6 +494,7 @@ async def _async_restore_on_node(
         )
         client = probe.client
     await client.async_restore_backup(recovery_secret, blob)
+    return client
 
 
 def _session_for(hass: HomeAssistant) -> aiohttp.ClientSession:

@@ -91,6 +91,11 @@ class FakeClient:
         self.restore_error = restore_error
         self.restores: list[tuple[str, str]] = []
         self.backups = 0
+        self.identity_reads = 0
+
+    async def async_get_info(self) -> dict:
+        self.identity_reads += 1
+        return {"household_id": HID, "node_id": NID}
 
     async def async_create_backup(self) -> str:
         self.backups += 1
@@ -331,6 +336,21 @@ class TestBackUpAndRestore:
         )
 
         assert client.restores == [("secret", "deadbeef")]
+
+    async def test_the_node_is_read_back_after_a_restore(self, hass):
+        """A restore can change who the node says it is, so that is re-read afterwards."""
+        client = FakeClient()
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(
+            entry_with_api_access(), FakePoller(client)
+        )
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        await async_restore_entry(
+            hass, store, ENTRY_ID, recovery_secret="secret", backup_hex="deadbeef"
+        )
+
+        assert client.identity_reads == 1
 
     async def test_a_restore_without_a_secret_is_refused(self, hass):
         """The secret is the key: without it there is nothing to send that could work."""
