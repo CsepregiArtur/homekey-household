@@ -112,7 +112,16 @@ class BackupStore:
     ) -> None:
         # ``store`` is injectable so the retention rules can be exercised without a running
         # Home Assistant; nothing but the persistence layer is substituted.
-        self._store: Store = store if store is not None else Store(hass, BACKUP_STORE_VERSION, STORE_KEY)
+        # ``private=True`` matters: Home Assistant chmods a public store to 0o644, which
+        # makes the file readable by anything else on the host. A private one keeps the
+        # 0o600 it is created with. The blobs inside are sealed with a key derived from the
+        # household recovery secret, so the file is not the door - but there is no reason
+        # for it to be world-readable either.
+        self._store: Store = (
+            store
+            if store is not None
+            else Store(hass, BACKUP_STORE_VERSION, STORE_KEY, private=True)
+        )
         self._keep = keep
         self._backups: list[StoredBackup] = []
 

@@ -219,6 +219,28 @@ class TestBackupStore:
         assert store.backups == []
         assert store.latest() is None
 
+    async def test_the_file_is_not_world_readable(self, hass):
+        """Home Assistant chmods a public store to 0644; a private one stays 0600.
+
+        The blobs are sealed with a key derived from the recovery secret, so the file is not
+        the door - but on a shared host there is no reason for it to be readable by every
+        user and every add-on that can see the config directory.
+        """
+        from pathlib import Path
+
+        from custom_components.homekey_household.backup import STORE_KEY
+
+        store = BackupStore(hass)
+        await store.async_add(
+            StoredBackup(
+                node_id=NID, household_id=HID, created="1", node_time=None, blob="ab"
+            )
+        )
+
+        stored_file = Path(hass.config.path(".storage", STORE_KEY))
+        assert stored_file.exists()
+        assert stored_file.stat().st_mode & 0o777 == 0o600
+
 
 # ---------------------------------------------------------------------------
 # Which entries can be reached
