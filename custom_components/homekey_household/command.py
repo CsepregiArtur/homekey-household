@@ -10,6 +10,13 @@ Command key derivation (``HouseholdManager::deriveCommandKey``)::
                   key     = "HK-HOUSEHOLD-CMD-v1",
                   digest  = 32 bytes)
 
+Both inputs are **bytes** on the node, and the node can only hand them to a client as hex:
+its export endpoint hex-encodes the secret and the salt, ``/household`` reports the salt the
+same way, and its own restore path hex-decodes what it is given. They are therefore decoded
+here before deriving - see :func:`_key_material`. Deriving from the hex text instead yields
+a different key, which the node rejects with ``bad_mac`` while Home Assistant reports the
+command as sent, so the failure is invisible from this side.
+
 Canonical input (``MqttManager::makeCommandMac``)::
 
     canonical = f"{ts}{nonce}{req_id}{action}"
@@ -53,10 +60,33 @@ _LOGGER = logging.getLogger(__name__)
 _MAX_BLAKE2B_DIGEST = 64
 
 
-def _as_bytes(value: str | bytes) -> bytes:
+# A value this long that happens to be hex is treated as the hex form of the node's bytes.
+# Anything shorter is text: no household credential the node generates is smaller (a secret
+# is 32 bytes and the salt 16, so 64 and 32 hex characters respectively), and a short
+# password that merely looks like hex must not be reinterpreted as bytes it never meant.
+_MIN_HEX_MATERIAL_CHARS = 16
+
+
+def _key_material(value: str | bytes) -> bytes:
+    """The bytes a recovery secret or salt contributes to the key derivation.
+
+    The node holds both as bytes and presents them as hex - that is the only form it ever
+    gives out - so a hex value is decoded. Anything else is taken as UTF-8 text, which is
+    what a household whose secret was typed in as text needs.
+    """
     if isinstance(value, bytes):
         return value
-    return value.encode("utf-8")
+    text = value.strip()
+    if (
+        len(text) >= _MIN_HEX_MATERIAL_CHARS
+        and len(text) % 2 == 0
+        and all(char in _HEX_DIGITS for char in text)
+    ):
+        return bytes.fromhex(text)
+    return text.encode("utf-8")
+
+
+_HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 
 
 def derive_command_key(
@@ -67,19 +97,20 @@ def derive_command_key(
 
     Mirrors ``HouseholdManager::deriveCommandKey``: ``crypto_generichash`` is
     libsodium's BLAKE2b, where the ``key`` parameter is the label and the message
-    is ``recovery_secret || salt``.
+    is ``recovery_secret || salt`` - both as the bytes the node holds, which is why the
+    hex form it exports is decoded rather than hashed as text.
 
     Raises :class:`ValidationError` if the secret is empty (the firmware also
     rejects an empty derivation, returning no key).
     """
-    secret_bytes = _as_bytes(recovery_secret)
+    secret_bytes = _key_material(recovery_secret)
     if not secret_bytes:
         raise ValidationError("recovery_secret: must not be empty")
     label_bytes = COMMAND_KEY_LABEL.encode("utf-8")
     if len(label_bytes) > _MAX_BLAKE2B_DIGEST:
         raise ValidationError("command key label too long for BLAKE2b")
 
-    material = secret_bytes + _as_bytes(salt)
+    material = secret_bytes + _key_material(salt)
     try:
         return hashlib.blake2b(
             material,

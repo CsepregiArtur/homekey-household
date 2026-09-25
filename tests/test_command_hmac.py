@@ -56,6 +56,54 @@ class TestKeyDerivation:
         ).digest()
         assert key == expected
 
+    def test_hex_values_are_decoded_before_deriving(self):
+        """The node holds both values as bytes, so the hex it exports must be decoded."""
+        secret_hex = "a1" * 32  # 32 bytes, as the node reports a recovery secret
+        salt_hex = "b2" * 16  # 16 bytes, as ``/household`` reports the salt
+
+        key = derive_command_key(secret_hex, salt_hex)
+        expected = hashlib.blake2b(
+            bytes.fromhex(secret_hex) + bytes.fromhex(salt_hex),
+            key=COMMAND_KEY_LABEL.encode("utf-8"),
+            digest_size=32,
+        ).digest()
+        assert key == expected
+
+    def test_deriving_from_the_hex_text_would_be_a_different_key(self):
+        """Why the decoding matters: the other reading is the one the node rejects.
+
+        That mismatch is invisible from here - the command is published, Home Assistant
+        reports success, and the node records ``bad_mac`` in its audit log - so it is
+        pinned down by a test rather than left to be discovered on a door.
+        """
+        secret_hex = "a1" * 32
+        salt_hex = "b2" * 16
+
+        as_text = hashlib.blake2b(
+            (secret_hex + salt_hex).encode("utf-8"),
+            key=COMMAND_KEY_LABEL.encode("utf-8"),
+            digest_size=32,
+        ).digest()
+        assert derive_command_key(secret_hex, salt_hex) != as_text
+
+    def test_short_hex_looking_values_stay_text(self):
+        """A short secret that merely looks like hex is not reinterpreted as bytes."""
+        key = derive_command_key("abcd", "ef01")
+        expected = hashlib.blake2b(
+            b"abcdef01", key=COMMAND_KEY_LABEL.encode("utf-8"), digest_size=32
+        ).digest()
+        assert key == expected
+
+    def test_odd_length_hex_looking_values_stay_text(self):
+        """Half a byte is not a byte: an odd-length value cannot be hex."""
+        value = "a1b2c3d4e5f60718293a4b5c6d7e8f90a"  # 33 characters
+        assert len(value) % 2 == 1
+        key = derive_command_key(value, "")
+        expected = hashlib.blake2b(
+            value.encode("utf-8"), key=COMMAND_KEY_LABEL.encode("utf-8"), digest_size=32
+        ).digest()
+        assert key == expected
+
     def test_key_is_32_bytes(self):
         assert len(derive_command_key(SECRET, SALT)) == 32
 

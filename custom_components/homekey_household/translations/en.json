@@ -101,14 +101,15 @@
         "description": "Rotate the command credential or change availability settings. Leaving the recovery secret blank keeps the current key.",
         "data": {
           "recovery_secret": "Recovery secret (leave blank to keep current key)",
-          "salt": "KDF salt (optional)",
+          "salt": "KDF salt (the node's recovery_salt, hex)",
           "command_control": "Enable authenticated lock control",
           "legacy_client_id_prefix": "Legacy MQTT client-id prefix (shared LWT)",
           "cause_entity": "Also record lock causes on another lock entity"
         },
         "data_description": {
           "legacy_client_id_prefix": "Prefix of the legacy client id (default ESP_). Used only to read the shared broker LWT availability topic.",
-          "cause_entity": "Optional. A node that also publishes its own MQTT discovery appears twice in Home Assistant, and each lock entity keeps its own activity log. Set this to the other lock to have the cause recorded there as well."
+          "cause_entity": "Optional. A node that also publishes its own MQTT discovery appears twice in Home Assistant, and each lock entity keeps its own activity log. Set this to the other lock to have the cause recorded there as well - note that that entity reports its own state change too, so every change then shows up twice in its activity: once from it, once from here.",
+          "salt": "The node holds the recovery secret and this salt as bytes and reports both as hex. Both are needed to derive the command key: a secret without the matching salt derives a key the node rejects with bad_mac, and the rejection is not visible from here. The node prints its own salt as recovery_salt on its Household page."
         }
       }
     },
