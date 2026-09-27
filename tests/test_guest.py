@@ -20,6 +20,7 @@ import pytest
 
 from custom_components.homekey_household.button import HomeKeyGuestTeachButton
 from custom_components.homekey_household.const import (
+    DOMAIN,
     GUEST_SECONDS_PER_DAY,
     TOPIC_GUEST_STATUS,
     TOPIC_STATUS,
@@ -27,11 +28,15 @@ from custom_components.homekey_household.const import (
 from custom_components.homekey_household.coordinator import (
     HomeKeyHouseholdCoordinator,
 )
+from custom_components.homekey_household.diagnostics import (
+    async_get_config_entry_diagnostics,
+)
 from custom_components.homekey_household.models import (
     GuestState,
     GuestTag,
     ValidationError,
 )
+from custom_components.homekey_household.sensor import HomeKeyGuestTagsSensor
 from custom_components.homekey_household.switch import HomeKeyGuestAccessSwitch
 from helpers import TEST_HOUSEHOLD_ID, FakeConfigEntry, make_message
 
@@ -68,6 +73,25 @@ GUEST_STATUS: dict = {
         }
     ],
 }
+
+# Two taught cards, deliberately different: one labelled with an expiry, one with
+# ``valid_until`` 0 (never expires). The list is per node, and each card keeps its own
+# window.
+TWO_CARDS: dict = dict(
+    GUEST_STATUS,
+    count=2,
+    tags=[
+        dict(GUEST_STATUS["tags"][0]),
+        dict(
+            GUEST_STATUS["tags"][0],
+            tag_id="11223344",
+            uid="0411223344",
+            label="Dog walker",
+            valid_from=0,
+            valid_until=0,
+        ),
+    ],
+)
 
 
 @pytest.fixture
@@ -372,6 +396,106 @@ class TestGuestControlsAreHiddenWithoutTheFeature:
         # The node reported guest state, but there is no direct transport to write over.
         assert coordinator.guest_manageable is False
         assert switch.available is False
+
+
+class TestMultipleTaughtCards:
+    """A node holds up to 16 cards, and all of them must be listed.
+
+    One arming teaches one card, so teaching three cards means arm-and-tap three
+    times. Re-teaching a card that is already known refreshes its own entry rather
+    than spending a second slot.
+    """
+
+    def test_every_taught_card_is_listed(self):
+        state = GuestState.from_dict(TWO_CARDS)
+        assert state.count == 2
+        assert [tag.label for tag in state.tags] == ["Cleaner", "Dog walker"]
+        assert [tag.tag_id for tag in state.tags] == ["A1B2C3D4", "11223344"]
+
+    def test_each_card_keeps_its_own_window(self):
+        state = GuestState.from_dict(TWO_CARDS)
+        # One card expires, the other never does: the window is per card, not per node.
+        assert state.tags[0].expires is not None
+        assert state.tags[1].expires is None
+
+    def test_the_capacity_is_reported_so_a_full_table_is_visible(self):
+        payload = dict(TWO_CARDS, count=16, capacity=16)
+        state = GuestState.from_dict(payload)
+        assert state.count == state.capacity == 16
+
+    async def test_the_sensor_lists_the_cards_and_the_count(self, coordinator):
+        await coordinator.async_handle_message(
+            make_message(TOPIC_GUEST_STATUS, json.dumps(TWO_CARDS))
+        )
+        sensor = HomeKeyGuestTagsSensor(coordinator, NID)
+
+        assert sensor.native_value == 2
+        attributes = sensor.extra_state_attributes
+        assert attributes["capacity"] == 16
+        assert [card["label"] for card in attributes["tags"]] == [
+            "Cleaner",
+            "Dog walker",
+        ]
+        assert attributes["tags"][0]["tag_id"] == "A1B2C3D4"
+
+
+class _DiagRuntime:
+    """The part of the runtime diagnostics reads."""
+
+    def __init__(self, entry, coordinator) -> None:
+        self.config_entry = entry
+        self.coordinator = coordinator
+        self.transport = None
+        self.credential_store = _NoCredentials()
+
+
+class _NoCredentials:
+    def get(self, household_id: str):
+        return None
+
+
+class TestGuestDiagnostics:
+    """The taught cards are readable from diagnostics, not only entity attributes."""
+
+    async def test_the_taught_cards_are_reported(self, hass):
+        entry = FakeConfigEntry(entry_id="guest-entry")
+        coordinator = HomeKeyHouseholdCoordinator(hass, entry, household_id=HID)
+        hass.data.setdefault(DOMAIN, {})["guest-entry"] = _DiagRuntime(entry, coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_GUEST_STATUS, json.dumps(TWO_CARDS))
+        )
+
+        result = await async_get_config_entry_diagnostics(hass, entry)
+
+        guest = result["nodes"][0]["guest"]
+        assert guest["count"] == 2
+        assert guest["capacity"] == 16
+        assert [card["label"] for card in guest["tags"]] == ["Cleaner", "Dog walker"]
+        assert guest["write"]["last_result"] == "success"
+
+    async def test_nothing_that_could_clone_a_card_is_reported(self, hass):
+        entry = FakeConfigEntry(entry_id="guest-entry")
+        coordinator = HomeKeyHouseholdCoordinator(hass, entry, household_id=HID)
+        hass.data.setdefault(DOMAIN, {})["guest-entry"] = _DiagRuntime(entry, coordinator)
+        await coordinator.async_handle_message(
+            make_message(TOPIC_GUEST_STATUS, json.dumps(TWO_CARDS))
+        )
+
+        dump = json.dumps(await async_get_config_entry_diagnostics(hass, entry))
+
+        # The node never publishes a per-tag secret, and the model has no field for it.
+        assert "token" not in dump
+
+    async def test_a_node_without_guest_support_reports_none(self, hass):
+        """``None`` is "not reported", which is not the same as "no cards"."""
+        entry = FakeConfigEntry(entry_id="guest-entry")
+        coordinator = HomeKeyHouseholdCoordinator(hass, entry, household_id=HID)
+        hass.data.setdefault(DOMAIN, {})["guest-entry"] = _DiagRuntime(entry, coordinator)
+        await coordinator.async_handle_message(make_message(TOPIC_STATUS, "online"))
+
+        result = await async_get_config_entry_diagnostics(hass, entry)
+
+        assert result["nodes"][0]["guest"] is None
 
 
 class TestNoCoercion:

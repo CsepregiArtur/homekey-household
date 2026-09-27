@@ -153,6 +153,43 @@ async def async_get_config_entry_diagnostics(
                     if node.last_auth
                     else None
                 ),
+                # Guest tags: the taught cards, so the list is visible to support (and
+                # anyone reading diagnostics) rather than only on the guest sensor's
+                # attributes. A card's per-tag secret is not in the model at all - the
+                # node never publishes it - so there is nothing here to redact and
+                # nothing that could clone a card. ``None`` means the node has not
+                # reported guest state: older firmware, or no poll yet.
+                "guest": (
+                    {
+                        "enabled": node.guest.enabled,
+                        "count": node.guest.count,
+                        "capacity": node.guest.capacity,
+                        "default_validity_days": round(
+                            node.guest.default_validity_days, 2
+                        ),
+                        "node_has_wall_clock": node.guest.has_wall_clock,
+                        "tags": [
+                            {
+                                "tag_id": tag.tag_id,
+                                "label": tag.label,
+                                "uid": tag.uid,
+                                "enabled": tag.enabled,
+                                "expires": tag.expires,
+                                "last_used_at": tag.last_used_at or None,
+                                "use_count": tag.use_count,
+                            }
+                            for tag in node.guest.tags
+                        ],
+                        "write": {
+                            "armed": node.guest.write_armed,
+                            "supported": node.guest.can_write,
+                            "last_result": node.guest.last_write_result,
+                            "last_message": node.guest.last_write_message,
+                        },
+                    }
+                    if node.guest is not None
+                    else None
+                ),
                 "health": (
                     {
                         "network": health.network,

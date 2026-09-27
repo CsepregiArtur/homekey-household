@@ -185,6 +185,20 @@ Guest tags are an ordinary NFC card that unlocks the same way a HomeKey tap does
 with an optional validity window — a **locally verified** credential, not a HomeKey
 one. Managing them needs the direct (TLS) transport; the state arrives over both.
 
+**Teaching more than one card.** A node holds up to **16** guest cards, each with its
+own label and its own validity window. One `guest_teach` call arms one write, so
+teaching three cards means arm-and-tap three times. Re-teaching a card the node
+already knows refreshes that card's entry instead of spending a second slot — so a
+lost card is **revoked**, not overwritten.
+
+**Where the list is.** `sensor.<node>_guest_tags` has the count as its state and the
+cards as attributes: `tags` (`tag_id`, `label`, `uid`, `enabled`, `expires`,
+`last_used_at`, `use_count`), plus `capacity`, `default_validity_days`,
+`write_armed`, `write_supported`, `last_write_result`, `last_write_message` and
+`node_has_wall_clock`. The same list is in the diagnostics download under
+`nodes[].guest`. A card's per-tag secret is in neither — the node never publishes it,
+so nothing readable from Home Assistant could clone a card.
+
 Device identity is `household_id + node_id` (never the MAC address or HomeKit
 `deviceID`).
 
