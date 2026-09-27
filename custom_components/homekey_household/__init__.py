@@ -69,6 +69,7 @@ from .direct import (
     DirectTransportError,
     async_connect_node,
 )
+from .guest import async_setup_guest_services
 from .mqtt import HAMqttTransport, HomeKeyMqttClient
 
 _LOGGER = logging.getLogger(__name__)
@@ -78,6 +79,8 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.SENSOR,
     Platform.BUTTON,
+    Platform.SWITCH,
+    Platform.NUMBER,
 ]
 
 type HomeKeyConfigEntry = ConfigEntry[HomeKeyRuntime]
@@ -119,6 +122,7 @@ async def async_setup(hass: HomeAssistant, config: dict[str, Any]) -> bool:
     """
     hass.data.setdefault(DOMAIN, {})
     await async_setup_backups(hass)
+    await async_setup_guest_services(hass)
     return True
 
 

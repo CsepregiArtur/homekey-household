@@ -34,11 +34,18 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
-from .backup import BACKUP_STORE_KEY, BackupStore, StoredBackup
+from .backup import (
+    BACKUP_STORE_KEY,
+    BackupStore,
+    StoredBackup,
+    backup_client_for,
+    entry_backup_settings,
+)
 from .const import (
     DOMAIN,
     ENTITY_SENSOR_BACKUP,
     ENTITY_SENSOR_FIRMWARE,
+    ENTITY_SENSOR_GUEST_TAGS,
     ENTITY_SENSOR_HEALTH,
     ENTITY_SENSOR_LAST_AUTH,
     ENTITY_SENSOR_SECURITY,
@@ -60,13 +67,14 @@ _LAST_AUTH_OPTIONS = ["SUCCESS", "FAILURE"]
 def _sensors_for_node(
     coordinator: HomeKeyHouseholdCoordinator, node_id: str
 ) -> list[HomeKeyBaseSensor]:
-    """Build the five documented sensors for one node."""
+    """Build the documented sensors for one node, plus the guest tag count."""
     return [
         HomeKeyHealthSensor(coordinator, node_id),
         HomeKeyBackupSensor(coordinator, node_id),
         HomeKeySecuritySensor(coordinator, node_id),
         HomeKeyFirmwareSensor(coordinator, node_id),
         HomeKeyLastAuthSensor(coordinator, node_id),
+        HomeKeyGuestTagsSensor(coordinator, node_id),
     ]
 
 
@@ -177,11 +185,7 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             coordinator,
             node_id,
             ENTITY_SENSOR_BACKUP,
-            lambda node: (
-                node.backup.status
-                if node.backup
-                else node.backup_status
-            ),
+            lambda node: node.backup.status if node.backup else node.backup_status,
             options=_BACKUP_OPTIONS,
         )
 
@@ -191,6 +195,19 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
         if not isinstance(store, BackupStore):
             return []
         return store.for_node(self._node_id)
+
+    def _api_configured(self) -> bool:
+        """Whether this entry has what a backup or a restore needs.
+
+        Both travel over the node's own HTTPS API, not over MQTT, so an entry without
+        an address, a fingerprint and Web UI credentials cannot do either - and that is
+        worth saying on the entity rather than only in a log line when a button is
+        pressed.
+        """
+        runtime = self.hass.data.get(DOMAIN, {}).get(self.coordinator.entry_id)
+        if runtime is None:
+            return False
+        return backup_client_for(entry_backup_settings(runtime))
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
@@ -207,6 +224,7 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             attributes["backup_age_seconds"] = _age_seconds(parsed)
         if node.backup_status is not None:
             attributes["last_event"] = node.backup_status
+
         stored = self._stored_backups()
         attributes["stored_backups"] = len(stored)
         if stored:
@@ -218,6 +236,39 @@ class HomeKeyBackupSensor(HomeKeyBaseSensor):
             attributes["stored_includes_credentials"] = latest.includes_credentials
             if latest.node_time is not None:
                 attributes["stored_node_time"] = latest.node_time
+            # Every copy, so the rolling window is visible rather than only its newest
+            # entry. Metadata only - the blobs themselves stay in the store.
+            attributes["stored_backups_detail"] = [
+                {
+                    "created": entry.created,
+                    "age_seconds": _age_seconds(_parse_dt(entry.created)),
+                    "includes_credentials": entry.includes_credentials,
+                    "hex_bytes": len(entry.blob) // 2,
+                    "node_time": entry.node_time,
+                }
+                for entry in stored
+            ]
+
+        # The restore flow, in one place, because it is three separate facts that only
+        # mean something together: is there a copy, does it carry the node's keys, and
+        # what does it still need.
+        attributes["restore"] = {
+            "available": bool(stored),
+            # Only a copy taken with the node's keys inside can bring a *replacement*
+            # node back without every tag being enrolled again. Without it, the file
+            # restores membership and configuration, and the enrolled devices have to
+            # be provisioned afresh. ``None`` when there is nothing to restore from.
+            "from_credentials_backup": (
+                stored[-1].includes_credentials if stored else None
+            ),
+            # Always required, and never kept here by design: the secret is the key the
+            # backup was sealed with *and* the proof of the right to rejoin, so it is
+            # supplied per restore and passed straight to the node.
+            "recovery_secret_required": True,
+            "service": "homekey_household.restore_backup",
+        }
+        # Whether a backup or a restore can reach the node at all.
+        attributes["api_configured"] = self._api_configured()
         return attributes
 
 
@@ -341,3 +392,65 @@ def _finding_lines(warnings: str | None) -> list[str]:
     if not warnings:
         return []
     return [line.strip() for line in warnings.splitlines() if line.strip()]
+
+
+class HomeKeyGuestTagsSensor(HomeKeyBaseSensor):
+    """How many guest cards are taught to this node.
+
+    The card list is an attribute, because a sensor's state has to be one value and the
+    list is what actually makes the entity useful.
+
+    Only non-secret fields are exposed. The node never publishes a card's per-tag
+    secret - not on ``guest/status`` and not on ``/api/ha/guest`` - so there is nothing
+    here that could be used to clone a card, and nothing this file has to remember to
+    strip.
+
+    ``None`` (unknown) until the node reports: an older firmware, or a poll that has not
+    happened yet, is not the same claim as "no guest tags".
+    """
+
+    def __init__(self, coordinator: HomeKeyHouseholdCoordinator, node_id: str) -> None:
+        super().__init__(
+            coordinator, node_id, ENTITY_SENSOR_GUEST_TAGS, lambda node: None
+        )
+        self._attr_native_unit_of_measurement = "tags"
+
+    @property
+    def native_value(self) -> int | None:
+        node = self._node()
+        guest = node.guest if node else None
+        return guest.count if guest is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        attrs = dict(super().extra_state_attributes)
+        node = self._node()
+        guest = node.guest if node else None
+        if guest is None:
+            return attrs
+        attrs.update(
+            {
+                "tags": [
+                    {
+                        "tag_id": tag.tag_id,
+                        "label": tag.label,
+                        "uid": tag.uid,
+                        "enabled": tag.enabled,
+                        "expires": tag.expires,
+                        "last_used_at": tag.last_used_at or None,
+                        "use_count": tag.use_count,
+                    }
+                    for tag in guest.tags
+                ],
+                "capacity": guest.capacity,
+                "default_validity_days": round(guest.default_validity_days, 2),
+                # The card-writer state, so the UI can explain why a teach command did
+                # nothing: armed and waiting, out of slots, or unsupported reader.
+                "write_armed": guest.write_armed,
+                "write_supported": guest.can_write,
+                "last_write_result": guest.last_write_result,
+                "last_write_message": guest.last_write_message,
+                "node_has_wall_clock": guest.has_wall_clock,
+            }
+        )
+        return attrs

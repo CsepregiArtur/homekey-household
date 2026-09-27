@@ -22,6 +22,7 @@ from custom_components.homekey_household.const import (
     LEGACY_COMMAND_TOPICS,
     TOPIC_CMD_LOCK,
     TOPIC_CMD_UNLOCK,
+    TOPIC_GUEST_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
     TOPIC_SECURITY,
@@ -309,5 +310,8 @@ class TestKnownSubtopicSets:
             "backup/last",
             TOPIC_LAST_AUTH,
             "lock/last",
+            # Guest status is JSON and token-free: a guest card's secret is never
+            # published, so there is nothing in this document to strip here.
+            TOPIC_GUEST_STATUS,
         } == JSON_SUBTOPICS
         assert {TOPIC_STATUS, TOPIC_SECURITY, "backup/status"} == PLAIN_SUBTOPICS

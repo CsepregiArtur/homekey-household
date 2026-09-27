@@ -35,6 +35,8 @@ internals, and it never opens a broker connection of its own.
 ## Documentation
 
 📖 **[Full integration documentation →](docs/HA_V2_INTEGRATION.md)**
+📖 **[Backup and full restore →](docs/BACKUP_AND_RESTORE.md)** — where the copies live,
+how to make one carry the node's keys, and how to put a replacement node back from one.
 
 It covers architecture, installation, configuration, household setup, node
 discovery, entities, lock control, HMAC command security, credential storage,
@@ -98,8 +100,45 @@ unavailable, and the node's last known state is kept until then.
 
 **What it does not do.** One entry covers one node — a household reaching HA over
 the direct transport produces one entry per node, while the MQTT transport covers
-a whole household in one. Backup, restore, audit and provisioning remain
-HTTP-only on the firmware and are not exposed as entities either way.
+a whole household in one. Audit and provisioning remain HTTP-only on the firmware
+and are not exposed as entities.
+
+---
+
+## Backups and restores
+
+A backup exists only as the reply to a request on the node's own HTTPS API, so the
+integration asks on a schedule (daily, newest 7 kept per node) and on demand, and
+keeps the copies. **The node keeps none** — only the time and hash of the last one.
+
+Two shapes, and the difference decides what a copy is good for:
+
+| Shape | Restores | A replacement node needs |
+|---|---|---|
+| Configuration only *(default)* | household membership, configuration, issuers | every device and tag **re-enrolled** |
+| **With the node's keys** | the above **plus** its reader credential store and HomeKit pairing state | **nothing** — it comes back as the same device |
+
+A credential-carrying copy is the keys to the door, so it is off by default.
+Turn it on per entry under **Configure**, or ask for a single copy:
+`homekey_household.create_backup` with `include_credentials: true`.
+
+A restore needs a stored copy **and** the household recovery secret — which is
+never stored here, because it is both the key the backup was sealed with and the
+proof of the right to rejoin:
+
+```yaml
+action: homekey_household.restore_backup
+data:
+  config_entry_id: 01J...      # which node
+  recovery_secret: 9f2c...     # required, passed to the node and not kept
+  # backup: 0107a1b2...       # optional; omitted = newest stored copy
+```
+
+The flow is visible in Home Assistant: `sensor.<node>_backup` exposes
+`stored_backups`, `stored_includes_credentials`, `stored_backups_detail`,
+`api_configured` and a `restore` block, and diagnostics adds a `backup_store`
+summary. See **[Backup and full restore](docs/BACKUP_AND_RESTORE.md)** for the
+the step-by-step replacement-node procedure and the limits.
 
 ---
 
@@ -115,8 +154,9 @@ Household base `B = homekey/household/<household_id>/nodes/<node_id>`
 | Publish | `B/command/lock`, `B/command/unlock` (HMAC-SHA256 authenticated) |
 
 Reserved/not-implemented topics (`B/events`, `B/backup/{request,data}`,
-`B/restore/*`) are never used. Backup/restore/audit/provisioning are HTTP-only on
-the firmware.
+`B/restore/*`) are never used: **backup, restore, audit and provisioning are
+HTTP-only on the firmware**, and the integration reaches them over the node's own
+API rather than over MQTT.
 
 ---
 
@@ -131,6 +171,19 @@ the firmware.
 | Security status | `sensor` | `<hid>_<nid>_security` |
 | Firmware version | `sensor` | `<hid>_<nid>_firmware` |
 | Last HomeKey authentication | `sensor` | `<hid>_<nid>_last_auth` |
+| Guest tags | `sensor` | `<hid>_<nid>_guest_tags` |
+| Guest access | `switch` | `<hid>_<nid>_guest_access` |
+| Guest default validity | `number` | `<hid>_<nid>_guest_validity` |
+| Back up now | `button` | `<hid>_<nid>_backup_now` |
+| Teach guest card | `button` | `<hid>_<nid>_guest_teach` |
+| Cancel guest card write | `button` | `<hid>_<nid>_guest_cancel` |
+
+Services: `create_backup`, `restore_backup`, `guest_teach`, `guest_revoke`,
+`guest_cancel` (all under `homekey_household.`).
+
+Guest tags are an ordinary NFC card that unlocks the same way a HomeKey tap does,
+with an optional validity window — a **locally verified** credential, not a HomeKey
+one. Managing them needs the direct (TLS) transport; the state arrives over both.
 
 Device identity is `household_id + node_id` (never the MAC address or HomeKit
 `deviceID`).

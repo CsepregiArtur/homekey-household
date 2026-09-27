@@ -135,13 +135,17 @@ def subtopics(messages) -> dict[str, str]:
 class FakeDirectClient:
     """A DirectClient that answers from memory, and can be made to fail."""
 
-    def __init__(self, state=None, info=None, *, failures: int = 0) -> None:
+    def __init__(self, state=None, info=None, *, failures: int = 0, guest=None) -> None:
         self.base_url = "https://192.0.2.10:443"
         self.info = NODE_INFO if info is None else info
         self.state = node_state() if state is None else state
         self.failures_left = failures
         self.calls = 0
         self.lock_actions: list[str] = []
+        # Guest state is optional on this fake: ``None`` mimics firmware without the
+        # guest feature, which is the case the poller has to tolerate.
+        self.guest = guest
+        self.guest_failures = 0
 
     async def async_get_info(self) -> dict:
         self.calls += 1
@@ -156,6 +160,12 @@ class FakeDirectClient:
     async def async_lock(self, action: str) -> dict:
         self.lock_actions.append(action)
         return {"action": action, "state": "unlocked", "current": 0, "target": 0}
+
+    async def async_get_guest(self) -> dict | None:
+        if self.guest_failures > 0:
+            self.guest_failures -= 1
+            raise DirectTransportError("the guest endpoint did not answer")
+        return self.guest
 
 
 @pytest.fixture
@@ -363,9 +373,7 @@ class TestPollerIngestion:
     """The poller feeds the coordinator exactly as the MQTT client does."""
 
     async def test_a_poll_registers_the_node(self, hass, coordinator):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         await poller.async_poll_once()
 
         node = coordinator.get_node(NID)
@@ -378,9 +386,7 @@ class TestPollerIngestion:
         assert poller.node_id == NID
 
     async def test_health_lands_in_the_shared_model(self, hass, coordinator):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         await poller.async_poll_once()
 
         node = coordinator.get_node(NID)
@@ -393,9 +399,7 @@ class TestPollerIngestion:
         assert node.health.certificate == "unknown"
 
     async def test_lock_entity_state_is_derived_normally(self, hass, coordinator):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         await poller.async_poll_once()
 
         node = coordinator.get_node(NID)
@@ -405,9 +409,7 @@ class TestPollerIngestion:
     async def test_security_and_backup_and_last_auth_are_ingested(
         self, hass, coordinator
     ):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         await poller.async_poll_once()
 
         node = coordinator.get_node(NID)
@@ -419,9 +421,7 @@ class TestPollerIngestion:
     async def test_a_single_failure_does_not_mark_the_node_offline(
         self, hass, coordinator
     ):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         await poller.async_poll_once()
         client = poller.client
         client.failures_left = 1
@@ -429,9 +429,7 @@ class TestPollerIngestion:
         await poller.async_poll_safely()
         assert coordinator.get_node(NID).online is True
 
-    async def test_a_run_of_failures_marks_the_node_offline(
-        self, hass, coordinator
-    ):
+    async def test_a_run_of_failures_marks_the_node_offline(self, hass, coordinator):
         client = FakeDirectClient()
         poller = DirectPoller(hass, coordinator, client, household_id=HID)
         await poller.async_poll_once()
@@ -459,9 +457,7 @@ class TestPollerIngestion:
         await poller.async_poll_safely()
         assert coordinator.get_node(NID).online is True
 
-    async def test_a_rehoused_node_is_refused_not_relabelled(
-        self, hass, coordinator
-    ):
+    async def test_a_rehoused_node_is_refused_not_relabelled(self, hass, coordinator):
         state = node_state(household_id=OTHER_HID)
         poller = DirectPoller(
             hass, coordinator, FakeDirectClient(state), household_id=HID
@@ -491,9 +487,7 @@ class TestDirectLockControl:
     async def test_control_is_reported_as_available_without_a_command_key(
         self, hass, coordinator
     ):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         coordinator.direct = poller
         # The direct transport authenticates with the device credential, so the
         # absence of a household command key says nothing about whether commands work.
@@ -535,9 +529,7 @@ class TestDirectLockControl:
         assert result["state"] == "unlocked"
 
     async def test_unsupported_action_is_refused(self, hass, coordinator):
-        poller = DirectPoller(
-            hass, coordinator, FakeDirectClient(), household_id=HID
-        )
+        poller = DirectPoller(hass, coordinator, FakeDirectClient(), household_id=HID)
         coordinator.direct = poller
         with pytest.raises(ValidationError):
             await coordinator.async_send_lock_command(NID, "unlatch")

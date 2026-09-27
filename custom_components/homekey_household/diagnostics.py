@@ -21,7 +21,14 @@ from typing import Any
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 
+from .backup import (
+    BACKUP_STORE_KEY,
+    BackupStore,
+    backup_client_for,
+    entry_backup_settings,
+)
 from .const import (
+    CONF_BACKUP_INCLUDE_CREDENTIALS,
     CONF_COMMAND_CONTROL,
     CONF_LEGACY_CLIENT_ID_PREFIX,
     DOMAIN,
@@ -53,6 +60,41 @@ _REDACT_KEYS = frozenset(
 )
 
 REDACTED = "[redacted]"
+
+
+def _backup_store_summary(
+    hass: HomeAssistant, household_id: str
+) -> dict[str, Any]:
+    """What the backup store holds - without any of the backups.
+
+    This is the flow a user asks about: is there a copy, when was it taken, and does it
+    carry the node's keys (which is what decides whether a replacement node needs every
+    tag enrolled again). None of it is the encrypted blob, so none of it needs
+    redacting, and the keys deliberately still do not appear.
+    """
+    store = hass.data.get(DOMAIN, {}).get(BACKUP_STORE_KEY)
+    if not isinstance(store, BackupStore):
+        return {"available": False}
+    copies = [
+        {
+            "node_id": entry.node_id,
+            "household_id": entry.household_id,
+            "created": entry.created,
+            "includes_credentials": entry.includes_credentials,
+            "hex_bytes": len(entry.blob) // 2,
+            "node_time": entry.node_time,
+        }
+        for entry in store.backups
+        if not household_id or entry.household_id == household_id
+    ]
+    return {
+        "available": True,
+        "count": len(copies),
+        "newest_created": copies[-1]["created"] if copies else None,
+        "any_includes_credentials": any(c["includes_credentials"] for c in copies),
+        # Newest last, the order the store keeps them in.
+        "copies": copies,
+    }
 
 
 def _redact(value: Any, key: str = "") -> Any:
@@ -142,6 +184,11 @@ async def async_get_config_entry_diagnostics(
                 "options": {
                     # Only non-secret options are reported.
                     CONF_COMMAND_CONTROL: entry.options.get(CONF_COMMAND_CONTROL),
+                    # Not secret, and it decides what a backup is worth: a copy without
+                    # the node's keys restores membership and configuration only.
+                    CONF_BACKUP_INCLUDE_CREDENTIALS: entry.options.get(
+                        CONF_BACKUP_INCLUDE_CREDENTIALS
+                    ),
                 },
             },
             "household_id": coordinator.household_id,
@@ -149,6 +196,9 @@ async def async_get_config_entry_diagnostics(
             "command_key_present": credential is not None,
             # One-way fingerprint only; not the key itself.
             "command_key_fingerprint": credential.fingerprint if credential else None,
+            # Whether a backup or a restore can reach the node at all.
+            "backup_api_configured": backup_client_for(entry_backup_settings(runtime)),
+            "backup_store": _backup_store_summary(hass, coordinator.household_id),
             "node_count": len(nodes),
             "nodes": nodes,
             "subscriptions": {

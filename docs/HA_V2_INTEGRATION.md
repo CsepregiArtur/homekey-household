@@ -350,10 +350,26 @@ never subscribes to or publishes them (the parser flags and drops them):
 | `B/restore/status` | RESERVED / NOT IMPLEMENTED |
 
 **Backup, restore, audit, and provisioning are HTTP-only** on the firmware
-(`POST /backup/create`, `POST /backup/restore`, `GET /audit`). If backup or
-restore integration is added later it must use those documented HTTP APIs — not
-invented MQTT topics. Encrypted backup blobs are never published over MQTT, and
-this integration never expects them there.
+(`POST /backup/create`, `POST /backup/restore`, `GET /audit`) — they are not carried
+over MQTT at all. Encrypted backup blobs are never published over MQTT, and this
+integration never expects them there.
+
+**Backup and restore ARE integrated** — they use those documented HTTP APIs, over the
+node's own TLS connection with the certificate pinned:
+
+| Service | Firmware endpoint |
+|---|---|
+| `homekey_household.create_backup` | `POST /backup/create` (daily schedule + on demand) |
+| `homekey_household.restore_backup` | `POST /backup/restore` |
+
+Copies are kept in the HA store `homekey_household.backups` (newest 7 per node,
+written `0o600`). A copy taken with `include_credentials` also carries the node's
+reader credential store and HomeKit pairing state, which is what lets a replacement
+node come back without re-enrolling every device.
+
+See **[Backup and full restore](BACKUP_AND_RESTORE.md)** for the flow, the
+replacement-node procedure, and what is visible on the backup sensor and in
+diagnostics. Audit and provisioning remain unintegrated.
 
 ---
 
@@ -591,8 +607,11 @@ path a retained `B/status` message would use.
 * One entry covers **one node**. A household reaching Home Assistant this way
   produces one entry per node, where the MQTT transport covers a whole household in
   one.
-* Backup, restore, audit and provisioning are HTTP-only on the firmware and are not
-  exposed as entities on either transport.
+* **Backup and restore are integrated but need this transport's API details** (address,
+  pinned fingerprint, Web UI credentials), because a backup only exists as the reply to
+  a request on the node's own HTTPS API. An entry without them reports
+  `api_configured: false` and is skipped for backups. Audit and provisioning remain
+  unintegrated. See **[Backup and full restore](BACKUP_AND_RESTORE.md)**.
 * An entry is refused if its household is already configured, over either
   transport: entity unique ids are `<household>_<node>_<entity>`, so a second entry
   would produce a duplicate set that the user could not tell apart.

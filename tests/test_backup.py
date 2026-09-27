@@ -93,10 +93,12 @@ class FakeClient:
         backup: str = "ab" * 8,
         restore_error: Exception | None = None,
         puts_credentials: bool = True,
+        reboot_required: bool = False,
     ) -> None:
         self.backup = backup
         self.restore_error = restore_error
         self.puts_credentials = puts_credentials
+        self.reboot_required = reboot_required
         self.restores: list[tuple[str, str]] = []
         self.backups = 0
         self.backup_requests: list[bool] = []
@@ -120,7 +122,9 @@ class FakeClient:
         if self.restore_error is not None:
             raise self.restore_error
         self.restores.append((recovery_secret, backup))
-        return {"success": True}
+        # A copy that carried the node's keys can only take effect after a restart, and
+        # the node says so in its answer.
+        return {"success": True, "reboot_required": self.reboot_required}
 
 
 def entry_with_api_access() -> FakeConfigEntry:
@@ -436,6 +440,44 @@ class TestBackUpAndRestore:
         )
 
         assert client.identity_reads == 1
+
+    async def test_a_credential_restore_says_the_node_is_restarting(self, hass, caplog):
+        """The node disappears for a few seconds, so say why.
+
+        A credential-carrying restore restarts the node to put the reader identity and
+        HomeKit pairing back into use. A silent gap is indistinguishable from a restore
+        that failed, so the restart is announced.
+        """
+        client = FakeClient(reboot_required=True)
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(
+            entry_with_api_access(), FakePoller(client)
+        )
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        with caplog.at_level("WARNING"):
+            await async_restore_entry(
+                hass, store, ENTRY_ID, recovery_secret="secret", backup_hex="deadbeef"
+            )
+
+        assert "restarting" in caplog.text
+
+    async def test_a_configuration_only_restore_claims_no_restart(self, hass, caplog):
+        """A copy without the keys applies and stops there, and says so."""
+        client = FakeClient()
+        hass.data.setdefault(DOMAIN, {})[ENTRY_ID] = FakeRuntime(
+            entry_with_api_access(), FakePoller(client)
+        )
+        store = BackupStore(hass, store=FakeStorage())
+        await store.async_load()
+
+        with caplog.at_level("INFO"):
+            await async_restore_entry(
+                hass, store, ENTRY_ID, recovery_secret="secret", backup_hex="deadbeef"
+            )
+
+        assert "configuration applied" in caplog.text
+        assert "restarting to put" not in caplog.text
 
     async def test_a_restore_without_a_secret_is_refused(self, hass):
         """The secret is the key: without it there is nothing to send that could work."""

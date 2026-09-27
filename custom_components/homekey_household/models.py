@@ -20,6 +20,7 @@ from enum import StrEnum
 from typing import Any
 
 from .const import (
+    GUEST_SECONDS_PER_DAY,
     KEY_AUTH_ISSUER,
     KEY_AUTH_RESULT,
     KEY_AUTH_TYPE,
@@ -29,6 +30,24 @@ from .const import (
     KEY_FIRMWARE,
     KEY_FREE_HEAP,
     KEY_GENERATION,
+    KEY_GUEST_CAN_WRITE,
+    KEY_GUEST_CAPACITY,
+    KEY_GUEST_COUNT,
+    KEY_GUEST_DEFAULT_VALIDITY,
+    KEY_GUEST_ENABLED,
+    KEY_GUEST_LABEL,
+    KEY_GUEST_LAST_USED,
+    KEY_GUEST_TAG_ID,
+    KEY_GUEST_TAGS,
+    KEY_GUEST_UID,
+    KEY_GUEST_USE_COUNT,
+    KEY_GUEST_VALID_FROM,
+    KEY_GUEST_VALID_UNTIL,
+    KEY_GUEST_WALL_CLOCK,
+    KEY_GUEST_WRITE,
+    KEY_GUEST_WRITE_ARMED,
+    KEY_GUEST_WRITE_MESSAGE,
+    KEY_GUEST_WRITE_RESULT,
     KEY_HOUSEHOLD_ID,
     KEY_LOCK_CHANGE_CURRENT,
     KEY_LOCK_CHANGE_TARGET,
@@ -409,7 +428,135 @@ class LockChange:
             current=current,
             source=source,
             target=_optional_int(data, KEY_LOCK_CHANGE_TARGET),
-            timestamp=normalise_timestamp(data.get(KEY_TIMESTAMP), "lock/last.timestamp"),
+            timestamp=normalise_timestamp(
+                data.get(KEY_TIMESTAMP), "lock/last.timestamp"
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class GuestTag:
+    """One guest card taught to a node.
+
+    A guest tag is an ordinary ISO14443A card carrying a credential the *node*
+    verifies locally: it unlocks the same way a HomeKey tap does, but it is not a
+    HomeKey credential and cannot become one (HomeKey is signed with Apple-issued
+    keys in a secure element).
+
+    The per-tag secret that protects the card is deliberately absent here. The
+    node never publishes it - not on ``guest/status`` and not on ``/api/ha/guest``
+    - so nothing the integration reads could be used to clone a card.
+    """
+
+    tag_id: str
+    uid: str = ""
+    label: str = ""
+    enabled: bool = True
+    valid_from: int = 0
+    valid_until: int = 0
+    last_used_at: int = 0
+    use_count: int = 0
+
+    @property
+    def expires(self) -> str | None:
+        """ISO timestamp of the expiry, or ``None`` when the tag does not expire."""
+        if not self.valid_until:
+            return None
+        # Imported here for the same reason ``normalise_timestamp`` does: the
+        # module stays importable without Home Assistant's clock helpers.
+        from datetime import UTC, datetime
+
+        return datetime.fromtimestamp(self.valid_until, tz=UTC).isoformat()
+
+    def expired_at(self, now: float) -> bool:
+        """Whether the tag's window has closed at ``now`` (epoch seconds).
+
+        ``valid_until`` of 0 means the tag never expires, which is not the same as
+        an expiry in the past.
+        """
+        if not self.valid_until:
+            return False
+        return now > self.valid_until
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> GuestTag:
+        data = _require_dict(payload, "guest tag")
+        return cls(
+            tag_id=_require_str(data, KEY_GUEST_TAG_ID),
+            uid=_optional_str(data, KEY_GUEST_UID) or "",
+            label=_optional_str(data, KEY_GUEST_LABEL) or "",
+            enabled=_optional_bool(data, KEY_GUEST_ENABLED) is not False,
+            valid_from=_optional_int(data, KEY_GUEST_VALID_FROM) or 0,
+            valid_until=_optional_int(data, KEY_GUEST_VALID_UNTIL) or 0,
+            last_used_at=_optional_int(data, KEY_GUEST_LAST_USED) or 0,
+            use_count=_optional_int(data, KEY_GUEST_USE_COUNT) or 0,
+        )
+
+
+@dataclass(frozen=True)
+class GuestState:
+    """A node's guest-tag status.
+
+    Comes from ``/api/ha/guest`` (direct transport) or the ``guest/status``
+    subtopic (MQTT). The card-writer fields are present on the direct API and are
+    absent over MQTT, which is why ``can_write`` is tri-state: ``None`` means "not
+    reported by this transport" rather than "cannot".
+    """
+
+    enabled: bool
+    default_validity_seconds: int = 0
+    capacity: int = 0
+    count: int = 0
+    wall_clock: int = 0
+    tags: tuple[GuestTag, ...] = ()
+    write_armed: bool = False
+    can_write: bool | None = None
+    last_write_result: str | None = None
+    last_write_message: str | None = None
+
+    @property
+    def has_wall_clock(self) -> bool:
+        """Whether the node knows the time.
+
+        A time-bounded tag cannot be verified without it - the node refuses such
+        a tap with ``NO_CLOCK`` rather than guessing - so this gates teaching.
+        """
+        return self.wall_clock > 0
+
+    @property
+    def default_validity_days(self) -> float:
+        """Default validity in days, as the number entity shows it."""
+        return self.default_validity_seconds / GUEST_SECONDS_PER_DAY
+
+    @classmethod
+    def from_dict(cls, payload: Any) -> GuestState:
+        data = _require_dict(payload, "guest/status")
+
+        tags: tuple[GuestTag, ...] = ()
+        raw_tags = data.get(KEY_GUEST_TAGS)
+        if raw_tags is not None:
+            if not isinstance(raw_tags, list):
+                raise ValidationError("guest/status.tags: expected a list")
+            tags = tuple(GuestTag.from_dict(item) for item in raw_tags)
+
+        write = data.get(KEY_GUEST_WRITE)
+        write = write if isinstance(write, dict) else {}
+
+        can_write = _optional_bool(write, KEY_GUEST_CAN_WRITE)
+
+        return cls(
+            enabled=_optional_bool(data, KEY_GUEST_ENABLED) is True,
+            default_validity_seconds=(
+                _optional_int(data, KEY_GUEST_DEFAULT_VALIDITY) or 0
+            ),
+            capacity=_optional_int(data, KEY_GUEST_CAPACITY) or 0,
+            count=_optional_int(data, KEY_GUEST_COUNT) or 0,
+            wall_clock=_optional_int(data, KEY_GUEST_WALL_CLOCK) or 0,
+            tags=tags,
+            write_armed=_optional_bool(write, KEY_GUEST_WRITE_ARMED) is True,
+            can_write=can_write,
+            last_write_result=_optional_str(write, KEY_GUEST_WRITE_RESULT),
+            last_write_message=_optional_str(write, KEY_GUEST_WRITE_MESSAGE),
         )
 
 
@@ -439,6 +586,10 @@ class Node:
     backup_status: str | None = None
     backup: BackupRecord | None = None
     last_auth: LastAuth | None = None
+    # Guest NFC tags: whether guest access is on, the default validity, and the
+    # cards taught to this node. ``None`` means "not reported yet" (older firmware,
+    # or before any poll), which is different from "guest access is off".
+    guest: GuestState | None = None
     # The most recent change the node reported, including what asked for it. Kept so a
     # lock state change can be attributed to a cause rather than to nothing.
     lock_change: LockChange | None = None

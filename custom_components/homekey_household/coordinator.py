@@ -29,12 +29,14 @@ from .const import (
     DEVICE_INITIATED_SOURCES,
     DOMAIN,
     ENTITY_LOCK,
+    GUEST_SECONDS_PER_DAY,
     JSON_SUBTOPICS,
     LOCK_EVENT_MAX_AGE_SECONDS,
     LOCK_SOURCE_LABELS,
     LOCK_STATE_MAP,
     TOPIC_BACKUP_LAST,
     TOPIC_BACKUP_STATUS,
+    TOPIC_GUEST_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
     TOPIC_LOCK_LAST,
@@ -49,6 +51,7 @@ from .const import (
 )
 from .models import (
     BackupRecord,
+    GuestState,
     LastAuth,
     LockChange,
     Node,
@@ -89,7 +92,10 @@ def _is_recent(timestamp: str | None, *, now: datetime | None = None) -> bool:
         # when it has not yet learned the time, and such a stamp says nothing about how
         # long ago the event happened - so it is taken at face value rather than discarded.
         return True
-    return (now or dt_util.utcnow()) - parsed <= timedelta(seconds=LOCK_EVENT_MAX_AGE_SECONDS)
+    return (now or dt_util.utcnow()) - parsed <= timedelta(
+        seconds=LOCK_EVENT_MAX_AGE_SECONDS
+    )
+
 
 # How long to wait for retained household messages to register nodes before the
 # entity platforms are set up. Retained messages are delivered asynchronously
@@ -202,6 +208,15 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
     def nodes(self) -> dict[str, Node]:
         return self._data.nodes
 
+    @property
+    def entry_id(self) -> str:
+        """This entry's id.
+
+        Exposed so entities can look the entry's own settings up in ``hass.data`` - the
+        backup store and the API settings a backup or restore needs both live there.
+        """
+        return self._entry_id
+
     # ------------------------------------------------------------------
     # MQTT message entry point
     # ------------------------------------------------------------------
@@ -298,6 +313,12 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             self._ensure_node(node_id).last_auth = LastAuth.from_dict(
                 payload, self.household_id, node_id
             )
+            updated = True
+        elif subtopic == TOPIC_GUEST_STATUS and node_id:
+            # Arrives over either transport: the node publishes it on the household
+            # namespace, and the direct poller replays it as the same subtopic. One
+            # parser, so the two cannot read the same firmware differently.
+            self._ensure_node(node_id).guest = GuestState.from_dict(payload)
             updated = True
         else:
             _LOGGER.debug("Unhandled subtopic: %s", subtopic)
@@ -448,7 +469,10 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             # No cause on record for *this* change. Using the previous one would blame
             # whatever happened last for what happened now.
             return
-        if node.attributed_lock_change is not None and node.attributed_lock_change == node.lock_change_key:
+        if (
+            node.attributed_lock_change is not None
+            and node.attributed_lock_change == node.lock_change_key
+        ):
             # This cause was already recorded when the node reported the event itself. The
             # snapshot has merely caught up with it.
             return
@@ -599,6 +623,18 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
             return True
         return bool(self.command_key())
 
+    @property
+    def guest_manageable(self) -> bool:
+        """Whether this transport can change guest settings.
+
+        Only the direct transport can. Enabling guest access could be done over MQTT,
+        but teaching and revoking a card cannot - they are not single signed actions,
+        and the household command namespace deliberately carries only lock/unlock. The
+        guest *state* still arrives over both transports, so the entities can show the
+        truth on either and only the controls go unavailable.
+        """
+        return self.direct is not None
+
     async def async_send_lock_command(self, node_id: str, action: str) -> Any:
         """Deliver a lock/unlock command over whichever transport is configured.
 
@@ -653,6 +689,97 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         return await self.async_send_lock_command(node_id, "unlock")
 
     # ------------------------------------------------------------------
+    # Guest tags
+    #
+    # Managing guest tags is direct-transport only. Enabling guest access could be
+    # expressed over MQTT (the node has plain ``guest/set_*`` topics), but teaching
+    # and revoking a card cannot: they are not single signed actions, and the
+    # household command namespace deliberately only carries lock/unlock. So rather
+    # than implement two-thirds of the feature on one transport and pretend, the
+    # writes go over the API and the entities say why when it is unavailable. The
+    # *state* still arrives over both transports.
+    # ------------------------------------------------------------------
+
+    def _guest_poller(self) -> Any:
+        """The direct poller, or raise a message a user can act on."""
+        if self.direct is None:
+            raise ValidationError(
+                "Managing guest tags needs the direct (TLS) transport; it is not "
+                "available over MQTT"
+            )
+        return self.direct
+
+    async def _async_refresh_after_guest_write(self, node_id: str) -> None:
+        """Re-read the node so entities show what the command produced.
+
+        Refreshing immediately matters more here than after a lock command: teaching
+        arms a ~60 second window on the node, so the interface has to show that the
+        node is now waiting for a card. A failed refresh is logged and swallowed -
+        the command was delivered, and the next scheduled poll catches up.
+        """
+        poller = self.direct
+        if poller is None:
+            return
+        try:
+            await poller.async_poll_once()
+        except Exception as err:  # noqa: BLE001 - a refresh failure must not hide success
+            _LOGGER.debug(
+                "Could not refresh %s/%s after a guest command: %s",
+                self.household_id,
+                node_id,
+                err,
+            )
+
+    async def async_set_guest_access(
+        self,
+        node_id: str,
+        *,
+        enabled: bool | None = None,
+        default_validity_days: float | None = None,
+    ) -> Any:
+        """Enable/disable guest access and/or set the default validity window."""
+        poller = self._guest_poller()
+        seconds = (
+            None
+            if default_validity_days is None
+            else int(round(default_validity_days * GUEST_SECONDS_PER_DAY))
+        )
+        result = await poller.client.async_set_guest_config(
+            enabled=enabled, default_validity_seconds=seconds
+        )
+        await self._async_refresh_after_guest_write(node_id)
+        return result
+
+    async def async_teach_guest_tag(
+        self,
+        node_id: str,
+        *,
+        label: str | None = None,
+        valid_days: float | None = None,
+    ) -> Any:
+        """Arm a card write on this node. The card must then be presented to it."""
+        poller = self._guest_poller()
+        result = await poller.client.async_guest_teach(
+            label=label, valid_days=valid_days
+        )
+        await self._async_refresh_after_guest_write(node_id)
+        return result
+
+    async def async_revoke_guest_tag(self, node_id: str, tag_id: str) -> Any:
+        """Revoke one guest tag on this node."""
+        poller = self._guest_poller()
+        result = await poller.client.async_guest_revoke(tag_id)
+        await self._async_refresh_after_guest_write(node_id)
+        return result
+
+    async def async_cancel_guest_write(self, node_id: str) -> Any:
+        """Cancel a card write that is armed and waiting for a card."""
+        poller = self._guest_poller()
+        result = await poller.client.async_guest_cancel()
+        await self._async_refresh_after_guest_write(node_id)
+        return result
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
     @staticmethod
@@ -678,9 +805,7 @@ class HomeKeyHouseholdCoordinator(DataUpdateCoordinator[HomeKeyData]):
         within the timeout (a household with no nodes is also a valid outcome and
         simply yields no entities until the next message arrives).
         """
-        wait_seconds = (
-            _INITIAL_NODE_WAIT_SECONDS if timeout is None else timeout
-        )
+        wait_seconds = _INITIAL_NODE_WAIT_SECONDS if timeout is None else timeout
         if self._data.nodes:
             return True
         if wait_seconds <= 0:

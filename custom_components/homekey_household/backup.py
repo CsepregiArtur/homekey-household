@@ -539,7 +539,25 @@ async def _async_restore_on_node(
             password=str(entry_data[CONF_PASSWORD]),
         )
         client = probe.client
-    await client.async_restore_backup(recovery_secret, blob)
+
+    result = await client.async_restore_backup(recovery_secret, blob)
+    if isinstance(result, dict) and result.get("reboot_required"):
+        # A copy that carried the node's credentials (its reader identity and HomeKit
+        # pairing state) can only take effect after a restart, and the node restarts
+        # itself. Say so, because the node then disappears for a few seconds and a
+        # silent gap is indistinguishable from a restore that failed. The entry is
+        # reloaded by the caller either way, which re-reads whatever identity the node
+        # comes back with.
+        _LOGGER.warning(
+            "The node is restarting to put the restored credentials into use; it will "
+            "be unreachable for a short while"
+        )
+    _LOGGER.info(
+        "The node accepted the restore (%s)",
+        "credentials applied, restarting"
+        if isinstance(result, dict) and result.get("reboot_required")
+        else "configuration applied",
+    )
     return client
 
 

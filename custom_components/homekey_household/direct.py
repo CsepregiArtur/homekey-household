@@ -40,6 +40,7 @@ from .const import (
     HEALTH_NETWORK_UNKNOWN,
     HEALTH_OK,
     TOPIC_BACKUP_STATUS,
+    TOPIC_GUEST_STATUS,
     TOPIC_HEALTH,
     TOPIC_LAST_AUTH,
     TOPIC_LOCK_LAST,
@@ -131,7 +132,9 @@ def fingerprints_match(expected: str, actual: str) -> bool:
     return normalise_fingerprint(expected) == normalise_fingerprint(actual)
 
 
-def fetch_peer_certificate(host: str, port: int, timeout: float = CERT_FETCH_TIMEOUT) -> bytes:
+def fetch_peer_certificate(
+    host: str, port: int, timeout: float = CERT_FETCH_TIMEOUT
+) -> bytes:
     """Return the DER certificate the node presents, without validating it.
 
     Deliberately unvalidated: this call is how we discover what we are about to
@@ -434,9 +437,7 @@ class DirectClient:
                     )
                 if response.status == 404:
                     # An older firmware without the /api/ha surface.
-                    raise DirectProtocolError(
-                        f"The node does not implement {path}"
-                    )
+                    raise DirectProtocolError(f"The node does not implement {path}")
                 if response.status >= 400:
                     raise DirectTransportError(
                         f"HTTP {response.status}: {(await response.text()).strip()}"
@@ -466,7 +467,9 @@ class DirectClient:
     async def async_get_state(self) -> dict[str, Any]:
         return await self._request("GET", "/api/ha/state")
 
-    async def async_check_protocol(self, supported: int = HA_API_PROTOCOL) -> dict[str, Any]:
+    async def async_check_protocol(
+        self, supported: int = HA_API_PROTOCOL
+    ) -> dict[str, Any]:
         """Fetch info and refuse a node this integration cannot interpret."""
         info = await self.async_get_info()
         reported = info.get("protocol")
@@ -489,7 +492,9 @@ class DirectClient:
             raise DirectProtocolError(f"Unsupported lock action: {action!r}")
         return await self._request("POST", "/api/ha/lock", json={"action": action})
 
-    async def async_create_backup(self, include_credentials: bool = False) -> tuple[str, bool]:
+    async def async_create_backup(
+        self, include_credentials: bool = False
+    ) -> tuple[str, bool]:
         """Ask the node for an encrypted backup.
 
         The backup is produced on demand and handed over in the reply; the node keeps only
@@ -517,14 +522,18 @@ class DirectClient:
             raise DirectProtocolError("The node did not return a backup")
         return blob, result.get("includes_credentials") is True
 
-    async def async_restore_backup(self, recovery_secret: str, backup: str) -> dict[str, Any]:
+    async def async_restore_backup(
+        self, recovery_secret: str, backup: str
+    ) -> dict[str, Any]:
         """Hand a backup and the recovery secret to a node, and let it restore itself.
 
         The secret both authorises the restore and decrypts the backup - it is the key the
         backup was sealed with - so it is passed straight to the node and never stored.
         """
         return await self._request(
-            "POST", "/backup/restore", json={"secret": recovery_secret, "backup": backup}
+            "POST",
+            "/backup/restore",
+            json={"secret": recovery_secret, "backup": backup},
         )
 
     async def async_get_backup_info(self) -> dict[str, Any]:
@@ -534,6 +543,97 @@ class DirectClient:
         one somewhere else.
         """
         return await self._request("GET", "/backup")
+
+    # ------------------------------------------------------------------
+    # Guest NFC tags
+    #
+    # Guest tags are a *locally verified* credential on an ordinary ISO14443A
+    # card: the node unlocks on a tap the same way it does for HomeKey, but
+    # without Apple's protocol and with a weaker threat model (a card can be
+    # cloned by anyone who reads it). The token that protects a card never leaves
+    # the node - not on this API and not on ``guest/status`` - so nothing here
+    # could be used to clone one.
+    # ------------------------------------------------------------------
+
+    async def async_get_guest(self) -> dict[str, Any] | None:
+        """The node's guest-tag status, or ``None`` on firmware that lacks it.
+
+        A node whose firmware predates guest tags answers 404. That means "this
+        node has no guest feature", not "the transport broke", so it is reported
+        as ``None`` and the guest entities simply have no state. Only a 404 is
+        treated this way: a 401 or a timeout is still a real failure and must
+        surface through the normal availability path.
+        """
+        try:
+            return await self._request("GET", "/api/ha/guest")
+        except DirectProtocolError:
+            _LOGGER.debug(
+                "Node at %s does not implement /api/ha/guest (older firmware); "
+                "guest entities will report unknown",
+                self._host,
+            )
+            return None
+
+    async def async_set_guest_config(
+        self,
+        *,
+        enabled: bool | None = None,
+        default_validity_seconds: int | None = None,
+    ) -> dict[str, Any]:
+        """Turn guest access on or off, and/or set the default validity window."""
+        body: dict[str, Any] = {}
+        if enabled is not None:
+            body["enabled"] = enabled
+        if default_validity_seconds is not None:
+            body["default_validity_seconds"] = int(default_validity_seconds)
+        if not body:
+            # The node answers 400 for a request that changes nothing, so fail here
+            # with a clearer reason rather than making it a round trip.
+            raise DirectProtocolError("No guest configuration was given")
+        return await self._request("POST", "/api/ha/guest/config", json=body)
+
+    async def async_guest_teach(
+        self,
+        *,
+        label: str | None = None,
+        valid_days: float | None = None,
+        valid_from: int | None = None,
+        valid_until: int | None = None,
+    ) -> dict[str, Any]:
+        """Mint a guest tag and arm a card write on the node.
+
+        The node cannot write the card here and now: its reader is owned by the NFC
+        task, so this arms the write and the answer says so. The card must then be
+        presented to *that node's* reader within the node's own timeout (~60 s), and
+        the outcome arrives on ``guest/status``.
+
+        ``valid_days`` is a convenience for "valid for N days from now" and needs the
+        node to know the wall clock; without one it answers 409 and an explicit
+        ``valid_from``/``valid_until`` must be used instead.
+        """
+        body: dict[str, Any] = {}
+        if label:
+            body["label"] = label
+        if valid_days is not None:
+            body["valid_days"] = valid_days
+        if valid_from is not None:
+            body["valid_from"] = int(valid_from)
+        if valid_until is not None:
+            body["valid_until"] = int(valid_until)
+        # An empty object, not no body: the node rejects a bodiless POST here.
+        return await self._request("POST", "/api/ha/guest/teach", json=body)
+
+    async def async_guest_revoke(self, tag_id: str) -> dict[str, Any]:
+        """Revoke one guest tag on this node."""
+        if not tag_id:
+            raise DirectProtocolError("A tag id is required to revoke a guest tag")
+        return await self._request(
+            "POST", "/api/ha/guest/revoke", json={"tag_id": tag_id}
+        )
+
+    async def async_guest_cancel(self) -> dict[str, Any]:
+        """Cancel a card write that is armed and waiting for a card."""
+        return await self._request("POST", "/api/ha/guest/cancel", json={})
 
 
 @dataclass(frozen=True)
@@ -589,11 +689,11 @@ async def async_connect_node(
     if not fingerprints_match(expected_fingerprint, actual):
         # Refuse before sending a credential. If the certificate is not the one the
         # node advertises, there is no reason to believe anything behind it.
-        raise DirectFingerprintMismatch(
-            expected=expected_fingerprint, actual=actual
-        )
+        raise DirectFingerprintMismatch(expected=expected_fingerprint, actual=actual)
 
-    client = DirectClient(session, host, port, pinned_ssl_context(der), username, password)
+    client = DirectClient(
+        session, host, port, pinned_ssl_context(der), username, password
+    )
     info = await client.async_check_protocol(HA_API_PROTOCOL)
     state = await client.async_get_state()
     household_id, node_id = resolve_identity(state, info)
@@ -613,7 +713,6 @@ async def async_connect_node(
         info=info,
         state=state,
     )
-
 
 
 class DirectPoller:
@@ -692,6 +791,31 @@ class DirectPoller:
             state, info, household_id=household_id, node_id=node_id
         ):
             await self._coordinator.async_handle_message(message)
+
+        # Guest state lives on its own endpoint rather than in /api/ha/state, and is
+        # replayed as the ``guest/status`` subtopic so it takes exactly the same
+        # ingestion path MQTT uses. A node without the endpoint reports None and is
+        # simply left with no guest state.
+        #
+        # Guest state is secondary, so nothing here may affect the node's
+        # availability: a guest read that times out, or a node whose firmware has no
+        # guest feature, is not evidence that the lock is unreachable. Failures are
+        # therefore swallowed (and logged at debug) instead of counting towards the
+        # offline threshold - which is also why this is not simply awaited inline.
+        try:
+            guest = await self._client.async_get_guest()
+            if guest is not None:
+                await self._coordinator.async_handle_message(
+                    HomeKeyMessage(
+                        household_id=household_id,
+                        node_id=node_id,
+                        subtopic=TOPIC_GUEST_STATUS,
+                        payload=json.dumps(guest),
+                        retain=True,
+                    )
+                )
+        except Exception as err:  # noqa: BLE001 - guest state must not gate availability
+            _LOGGER.debug("Could not read guest state for %s: %s", node_id, err)
         self._failures = 0
 
     async def async_poll_safely(self) -> None:

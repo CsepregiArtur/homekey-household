@@ -58,3 +58,90 @@ restore_backup:
       selector:
         text:
           multiline: true
+
+guest_teach:
+  name: Teach a guest card
+  description: >-
+    Arm a card write on a node. The card must then be presented to that node's own
+    reader within about a minute - the write happens on the device, where the reader
+    is, not here - so this is the start of the action rather than the end of it. The
+    outcome is visible on the node's Guest tags sensor. A guest tag is a locally
+    verified credential, not a HomeKey credential: it unlocks the same way, but a card
+    can be cloned by anyone who reads it.
+  fields:
+    config_entry_id:
+      name: Node
+      description: >-
+        Which node's reader to teach on. Required when more than one HomeKey entry is
+        configured, because a card is taught to one door's reader and guessing would
+        be worse than refusing.
+      required: false
+      selector:
+        config_entry:
+          integration: homekey_household
+    label:
+      name: Guest name
+      description: >-
+        A name for the card, up to 15 characters, shown in the guest list (for example
+        Cleaner). Left empty, the node records it as Guest.
+      required: false
+      example: Cleaner
+      selector:
+        text:
+    valid_days:
+      name: Valid for (days)
+      description: >-
+        How long the card should work, counted from now. Left empty, the node applies
+        its configured default validity; if that is 0 too, the card never expires.
+        Needs the node to know the wall clock, which it only does after syncing time.
+      required: false
+      example: 7
+      selector:
+        number:
+          min: 1
+          max: 365
+          unit_of_measurement: days
+          mode: box
+
+guest_revoke:
+  name: Revoke a guest card
+  description: >-
+    Remove one guest tag from a node. The card itself is untouched and becomes an
+    ordinary unknown card; revoking is how a lost card is handled, and it cannot be
+    undone except by teaching the card again.
+  fields:
+    config_entry_id:
+      name: Node
+      description: >-
+        Which node to revoke from. Required when more than one HomeKey entry is
+        configured.
+      required: false
+      selector:
+        config_entry:
+          integration: homekey_household
+    tag_id:
+      name: Tag id
+      description: >-
+        The card's tag id, as reported in the Guest tags sensor's attributes (eight
+        hex characters, for example A1B2C3D4).
+      required: true
+      example: A1B2C3D4
+      selector:
+        text:
+
+guest_cancel:
+  name: Cancel a guest card write
+  description: >-
+    Abandon a card write that is armed and waiting for a card, so it is not applied to
+    the next card presentation. The node times the arm out on its own; this is for
+    calling it off deliberately.
+  fields:
+    config_entry_id:
+      name: Node
+      description: >-
+        Which node to cancel on. Required when more than one HomeKey entry is
+        configured.
+      required: false
+      selector:
+        config_entry:
+          integration: homekey_household

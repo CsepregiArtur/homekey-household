@@ -150,11 +150,30 @@
       },
       "last_auth": {
         "name": "Last HomeKey authentication"
+      },
+      "guest_tags": {
+        "name": "Guest tags"
       }
     },
     "button": {
       "backup_now": {
         "name": "Back up now"
+      },
+      "guest_teach": {
+        "name": "Teach guest card"
+      },
+      "guest_cancel": {
+        "name": "Cancel guest card write"
+      }
+    },
+    "switch": {
+      "guest_access": {
+        "name": "Guest access"
+      }
+    },
+    "number": {
+      "guest_validity": {
+        "name": "Guest default validity"
       }
     }
   },

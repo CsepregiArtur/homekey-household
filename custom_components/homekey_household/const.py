@@ -147,6 +147,10 @@ TOPIC_SECURITY: Final = "security"
 TOPIC_BACKUP_STATUS: Final = "backup/status"
 TOPIC_BACKUP_LAST: Final = "backup/last"
 TOPIC_LAST_AUTH: Final = "last_auth"
+# Guest NFC tag status. The node publishes a *token-free* projection here: a guest
+# card's per-tag secret is never on this topic, so nothing read from it can be used
+# to clone a card. Retained, so a late subscriber still sees the current state.
+TOPIC_GUEST_STATUS: Final = "guest/status"
 # Origin of the most recent lock change. Published by the firmware immediately before the
 # state it explains, and retained, so a client can say *what* opened the door rather than
 # only that it opened.
@@ -173,6 +177,11 @@ DEFAULT_BACKUP_INCLUDE_CREDENTIALS: Final = False
 
 SERVICE_CREATE_BACKUP: Final = "create_backup"
 SERVICE_RESTORE_BACKUP: Final = "restore_backup"
+# Guest tag actions exposed as buttons. Teaching arms a write on the node and the card
+# must then be presented to its reader, so these are commands, not settings.
+SERVICE_GUEST_TEACH: Final = "guest_teach"
+SERVICE_GUEST_REVOKE: Final = "guest_revoke"
+SERVICE_GUEST_CANCEL: Final = "guest_cancel"
 # Translation key of the per-node "back up now" button.
 ENTITY_BUTTON_BACKUP: Final = "backup_now"
 
@@ -201,6 +210,7 @@ JSON_SUBTOPICS: Final[frozenset[str]] = frozenset(
         TOPIC_BACKUP_LAST,
         TOPIC_LAST_AUTH,
         TOPIC_LOCK_LAST,
+        TOPIC_GUEST_STATUS,
     }
 )
 
@@ -234,15 +244,10 @@ LEGACY_COMMAND_TOPICS: Final[frozenset[str]] = frozenset(
 
 def node_base(household_id: str, node_id: str) -> str:
     """Return the node base topic ``B`` (no trailing slash)."""
-    return (
-        f"{TOPIC_ROOT}/{TOPIC_HOUSEHOLD}/{household_id}"
-        f"/{TOPIC_NODES}/{node_id}"
-    )
+    return f"{TOPIC_ROOT}/{TOPIC_HOUSEHOLD}/{household_id}/{TOPIC_NODES}/{node_id}"
 
 
-def node_topic(
-    household_id: str, node_id: str, subtopic: str | None = None
-) -> str:
+def node_topic(household_id: str, node_id: str, subtopic: str | None = None) -> str:
     """Build a node-level topic.
 
     Example: ``homekey/household/HOME001/nodes/GATE-001/health``
@@ -255,9 +260,7 @@ def node_topic(
 # happens in the parser: only documented subtopics are acted upon.
 TOPIC_SUBSCRIBE_ALL: Final = f"{TOPIC_ROOT}/{TOPIC_HOUSEHOLD}/#"
 # Node discovery pattern: the first message on a node subtree registers a node.
-TOPIC_SUBSCRIBE_NODES: Final = (
-    f"{TOPIC_ROOT}/{TOPIC_HOUSEHOLD}/+/{TOPIC_NODES}/#"
-)
+TOPIC_SUBSCRIBE_NODES: Final = f"{TOPIC_ROOT}/{TOPIC_HOUSEHOLD}/+/{TOPIC_NODES}/#"
 
 
 def legacy_status_subscribe(prefix: str) -> str:
@@ -500,6 +503,31 @@ HEALTH_NETWORK_UNKNOWN: Final = "UNKNOWN"
 HEALTH_CERTIFICATE_UNKNOWN: Final = "unknown"
 
 # ---------------------------------------------------------------------------
+# Guest tag payload keys
+#
+# ``GET /api/ha/guest`` and the ``guest/status`` subtopic return the same shape, so
+# both transports are parsed by one model and cannot drift apart.
+# ---------------------------------------------------------------------------
+KEY_GUEST_ENABLED: Final = "enabled"
+KEY_GUEST_DEFAULT_VALIDITY: Final = "default_validity_seconds"
+KEY_GUEST_CAPACITY: Final = "capacity"
+KEY_GUEST_COUNT: Final = "count"
+KEY_GUEST_WALL_CLOCK: Final = "wall_clock"
+KEY_GUEST_TAGS: Final = "tags"
+KEY_GUEST_WRITE: Final = "write"
+KEY_GUEST_WRITE_ARMED: Final = "armed"
+KEY_GUEST_CAN_WRITE: Final = "can_write"
+KEY_GUEST_WRITE_RESULT: Final = "last_result"
+KEY_GUEST_WRITE_MESSAGE: Final = "last_message"
+KEY_GUEST_TAG_ID: Final = "tag_id"
+KEY_GUEST_UID: Final = "uid"
+KEY_GUEST_LABEL: Final = "label"
+KEY_GUEST_VALID_FROM: Final = "valid_from"
+KEY_GUEST_VALID_UNTIL: Final = "valid_until"
+KEY_GUEST_LAST_USED: Final = "last_used_at"
+KEY_GUEST_USE_COUNT: Final = "use_count"
+
+# ---------------------------------------------------------------------------
 # Entities: one per documented firmware discovery entity, plus the lock
 # ---------------------------------------------------------------------------
 ENTITY_LOCK: Final = "lock"
@@ -509,6 +537,32 @@ ENTITY_SENSOR_BACKUP: Final = "backup"
 ENTITY_SENSOR_SECURITY: Final = "security"
 ENTITY_SENSOR_FIRMWARE: Final = "firmware"
 ENTITY_SENSOR_LAST_AUTH: Final = "last_auth"
+
+# Guest NFC tags. Unlike the sensors above these are not firmware discovery entities:
+# the firmware's guest surface is the ``/api/ha/guest`` API plus the ``guest/status``
+# subtopic, and the integration is what turns it into entities.
+ENTITY_SWITCH_GUEST_ACCESS: Final = "guest_access"
+ENTITY_NUMBER_GUEST_VALIDITY: Final = "guest_validity"
+ENTITY_SENSOR_GUEST_TAGS: Final = "guest_tags"
+ENTITY_BUTTON_GUEST_TEACH: Final = "guest_teach"
+ENTITY_BUTTON_GUEST_CANCEL: Final = "guest_cancel"
+
+# ---------------------------------------------------------------------------
+# Guest tag limits and defaults
+# ---------------------------------------------------------------------------
+# The node stores a fixed number of guest tags (16 in firmware 0.10.0+). Kept here
+# so the entities can report "full" without hard-coding it twice.
+GUEST_TAG_CAPACITY: Final = 16
+GUEST_LABEL_MAX_LENGTH: Final = 15
+# Default validity offered by the number entity, in days. The firmware stores seconds;
+# days is the unit a person actually reasons about for a guest.
+GUEST_VALIDITY_DAYS_MIN: Final = 0
+GUEST_VALIDITY_DAYS_MAX: Final = 365
+GUEST_VALIDITY_DAYS_STEP: Final = 1
+GUEST_SECONDS_PER_DAY: Final = 24 * 60 * 60
+# The node must know the wall clock before a time-bounded tag can be verified at all
+# (otherwise a tap is refused with NO_CLOCK), so teaching with an expiry needs NTP.
+GUEST_WRITE_ARM_TIMEOUT_SECONDS: Final = 60
 
 # The six documented household entity unique-id suffixes.
 HOUSEHOLD_ENTITY_SUFFIXES: Final[tuple[str, ...]] = (
