@@ -67,7 +67,12 @@ class HomeKeyGuestValidityNumber(HomeKeyBaseEntity, NumberEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.guest_manageable
+        # Hidden when the node has no guest feature, or the transport cannot manage it.
+        return (
+            super().available
+            and self.coordinator.guest_manageable
+            and self.guest_reported
+        )
 
     @property
     def native_value(self) -> float | None:

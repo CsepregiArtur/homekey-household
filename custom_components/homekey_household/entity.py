@@ -45,6 +45,19 @@ class HomeKeyBaseEntity(CoordinatorEntity[HomeKeyHouseholdCoordinator]):
         return self.coordinator.get_node(self._node_id)
 
     @property
+    def guest_reported(self) -> bool:
+        """Whether this node has reported guest-* support at all.
+
+        A node whose firmware predates guest tags answers 404 on ``/api/ha/guest``
+        and publishes no ``guest/status``, so there is nothing to act on. Guest
+        *controls* use this to hide themselves rather than offering a button that
+        can only fail - "this node has no guest feature" and "guest access is off"
+        are different claims, and the second one is a door, not a firmware version.
+        """
+        node = self._node()
+        return node is not None and node.guest is not None
+
+    @property
     def available(self) -> bool:
         """Available only when the node reports online (``B/status`` + shared LWT)."""
         node = self._node()

@@ -18,9 +18,11 @@ import json
 
 import pytest
 
+from custom_components.homekey_household.button import HomeKeyGuestTeachButton
 from custom_components.homekey_household.const import (
     GUEST_SECONDS_PER_DAY,
     TOPIC_GUEST_STATUS,
+    TOPIC_STATUS,
 )
 from custom_components.homekey_household.coordinator import (
     HomeKeyHouseholdCoordinator,
@@ -30,6 +32,7 @@ from custom_components.homekey_household.models import (
     GuestTag,
     ValidationError,
 )
+from custom_components.homekey_household.switch import HomeKeyGuestAccessSwitch
 from helpers import TEST_HOUSEHOLD_ID, FakeConfigEntry, make_message
 
 HID = TEST_HOUSEHOLD_ID
@@ -323,6 +326,52 @@ class TestGuestWriteTranslation:
         coordinator.direct = poller
         result = await coordinator.async_teach_guest_tag(NID)
         assert result["tag_id"] == "A1B2C3D4"
+
+
+class TestGuestControlsAreHiddenWithoutTheFeature:
+    """A control that can only fail must not be offered.
+
+    A node whose firmware predates guest tags answers 404 on /api/ha/guest and
+    publishes no guest/status. Offering a switch and two buttons that error on every
+    press would read as "broken", when the truth is "this node has no guest feature".
+    """
+
+    async def test_hidden_until_the_node_reports_guest_state(self, coordinator):
+        poller = _RecordingPoller()
+        coordinator.direct = poller
+        await coordinator.async_handle_message(make_message(TOPIC_STATUS, "online"))
+
+        switch = HomeKeyGuestAccessSwitch(coordinator, NID)
+        teach = HomeKeyGuestTeachButton(coordinator, NID)
+        assert switch.available is False
+        assert teach.available is False
+        assert switch.is_on is None
+
+    async def test_shown_once_the_node_reports_guest_state(self, coordinator):
+        poller = _RecordingPoller()
+        coordinator.direct = poller
+        await coordinator.async_handle_message(make_message(TOPIC_STATUS, "online"))
+        await coordinator.async_handle_message(
+            make_message(TOPIC_GUEST_STATUS, json.dumps(GUEST_STATUS))
+        )
+
+        switch = HomeKeyGuestAccessSwitch(coordinator, NID)
+        teach = HomeKeyGuestTeachButton(coordinator, NID)
+        assert switch.available is True
+        assert teach.available is True
+        assert switch.is_on is True
+
+    async def test_hidden_on_a_transport_that_cannot_manage_them(self, coordinator):
+        """MQTT reports guest state but cannot teach or revoke, so the controls hide."""
+        await coordinator.async_handle_message(make_message(TOPIC_STATUS, "online"))
+        await coordinator.async_handle_message(
+            make_message(TOPIC_GUEST_STATUS, json.dumps(GUEST_STATUS))
+        )
+
+        switch = HomeKeyGuestAccessSwitch(coordinator, NID)
+        # The node reported guest state, but there is no direct transport to write over.
+        assert coordinator.guest_manageable is False
+        assert switch.available is False
 
 
 class TestNoCoercion:

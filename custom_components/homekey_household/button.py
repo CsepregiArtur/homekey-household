@@ -115,7 +115,11 @@ class HomeKeyGuestTeachButton(HomeKeyBaseEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.guest_manageable
+        return (
+            super().available
+            and self.coordinator.guest_manageable
+            and self.guest_reported
+        )
 
     async def async_press(self) -> None:
         try:
@@ -151,7 +155,11 @@ class HomeKeyGuestCancelButton(HomeKeyBaseEntity, ButtonEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.guest_manageable
+        return (
+            super().available
+            and self.coordinator.guest_manageable
+            and self.guest_reported
+        )
 
     async def async_press(self) -> None:
         try:

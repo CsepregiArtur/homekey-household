@@ -60,7 +60,14 @@ class HomeKeyGuestAccessSwitch(HomeKeyBaseEntity, SwitchEntity):
 
     @property
     def available(self) -> bool:
-        return super().available and self.coordinator.guest_manageable
+        # Also hidden when the node has no guest feature at all, or when the
+        # transport cannot manage it: a switch that can only fail is worse than no
+        # switch.
+        return (
+            super().available
+            and self.coordinator.guest_manageable
+            and self.guest_reported
+        )
 
     @property
     def is_on(self) -> bool | None:
